@@ -311,14 +311,15 @@ async def _set_deployed_build(ctx: ToolContext, args: dict) -> ToolResult:
     return ToolResult(f"deployed_build[{env}] = {build}")
 
 
-async def _transition_with_handoff(ctx: ToolContext, args: dict) -> ToolResult:
-    key, to_status = args["key"], args["to_status"]
-
+async def _check_transition(ctx: ToolContext, key: str, to_status: str,
+                            handoff_yaml: str) -> ToolResult | tuple[dict, str]:
+    """Full pre-flight for a transition: ownership, payload schema, ticket/status
+    consistency. Returns (payload, current_status) or an error ToolResult."""
     if ctx.role.trigger_type == "queue" and not ctx.owns(key):
         return ToolResult(f"ERROR: claim_ticket({key}) before transitioning it")
 
     try:
-        doc = yaml.safe_load(args["handoff_yaml"])
+        doc = yaml.safe_load(handoff_yaml)
     except yaml.YAMLError as e:
         return ToolResult(f"ERROR: handoff_yaml does not parse: {e}")
     payload = (doc or {}).get("agent_handoff") if isinstance(doc, dict) else None
@@ -335,6 +336,15 @@ async def _transition_with_handoff(ctx: ToolContext, args: dict) -> ToolResult:
     if payload["from_status"].lower() != current.lower():
         return ToolResult(f"ERROR: ticket is in '{current}' but handoff.from_status says "
                           f"'{payload['from_status']}' — re-read the ticket, someone moved it")
+    return payload, current
+
+
+async def _transition_with_handoff(ctx: ToolContext, args: dict) -> ToolResult:
+    key, to_status = args["key"], args["to_status"]
+    checked = await _check_transition(ctx, key, to_status, args["handoff_yaml"])
+    if isinstance(checked, ToolResult):
+        return checked
+    payload, current = checked
 
     body = f"{args['summary']}\n\n{{code:yaml}}\n{yaml.safe_dump({'agent_handoff': payload}, sort_keys=False)}{{code}}"
     await ctx.jira.add_comment(key, body)
@@ -360,6 +370,13 @@ async def _reject_to_rework(ctx: ToolContext, args: dict) -> ToolResult:
     rejection = validate_rejection(rework)
     if not rejection.ok:
         return ToolResult("ERROR: rejection payload invalid:\n- " + "\n- ".join(rejection.errors))
+
+    # Pre-flight the handoff too BEFORE posting anything: otherwise an invalid handoff
+    # would leave an orphaned rework payload on a ticket that never moved (and a
+    # duplicate payload on the retry, which the Rework Router then parses).
+    checked = await _check_transition(ctx, key, ctx.rework_status, args["handoff_yaml"])
+    if isinstance(checked, ToolResult):
+        return checked
 
     # Post the rejection payload first (the Rework Router's input), then handoff+transition
     body = (f"{args['summary']}\n\n{{code:yaml}}\n"
