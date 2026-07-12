@@ -1,0 +1,109 @@
+# Sentinel pipeline configuration.
+#
+# Status names must match your Jira workflow exactly (case-insensitive compare).
+# The dispatch table mirrors docs/00-overview-and-conventions.md — edit here if your
+# Jira workflow uses different status names.
+#
+# ${VAR} / ${VAR:default} references are expanded from the environment at load time.
+
+rework_limit: 2                # rework_count above this is never dispatched (loop-breaker)
+split_threshold_points: 8      # role 05 size gate
+
+labels:
+  activate: activate           # human sets this to pull a ticket out of the icebox (role 02)
+  leased: agent-leased
+  needs_human: needs-human
+  handoff_invalid: handoff-invalid
+  deploy_blocked: deploy-blocked
+  force_deploy: deploy-now     # human label to force an immediate deploy batch (role 09)
+  release_window: release-now  # human label that opens a release window (role 12)
+
+# WIP limits per status, enforced by the Orchestrator on agent dispatch.
+wip_limits:
+  "Business Requirements": 3
+  "Technical Requirements": 3
+  "Technical Refinement": 3
+  "In Progress": 3
+  "Tech Review": 3
+  "Internal Review": 3
+  "Client Review": 5
+  "Rework": 5
+
+# Role agents. Each is loaded with docs/00 + docs/00a + its own doc (README loading contract).
+#
+# trigger.type:
+#   ticket — one agent instance per ticket in the listed status(es)
+#   queue  — one singleton instance over the whole queue (planner / deploy / release)
+# require_label       — only tickets carrying this label trigger the role (label key from `labels:`)
+# condition           — extra dispatch predicate evaluated by the Orchestrator:
+#                         capacity_in_progress — In Progress below its WIP limit
+#                         release_window       — a ticket in the queue carries the release_window label
+# shell: true         — the agent gets the run_command tool (workspace under DATA_DIR/workspace)
+# model               — LiteLLM model override for this role
+roles:
+  02-intake-triage:
+    doc: docs/02-intake-triage.md
+    trigger: { type: ticket, statuses: ["New", "On Hold"], require_label: activate }
+
+  03-business-analyst:
+    doc: docs/03-business-analyst.md
+    trigger: { type: ticket, statuses: ["Business Requirements"] }
+
+  04-tech-lead-debrief:
+    doc: docs/04-tech-lead-debrief.md
+    trigger: { type: ticket, statuses: ["Technical Requirements"] }
+
+  05-refinement-estimation:
+    doc: docs/05-refinement-estimation.md
+    trigger: { type: ticket, statuses: ["Technical Refinement"] }
+    estimators: 3              # blind planning-poker instances (run_estimators tool)
+
+  06-sprint-planner:
+    doc: docs/06-sprint-planner.md
+    trigger: { type: queue, statuses: ["To Do"], condition: capacity_in_progress }
+
+  07-implementer:
+    doc: docs/07-implementer.md
+    trigger: { type: ticket, statuses: ["In Progress"] }
+    shell: true
+
+  08-code-reviewer:
+    doc: docs/08-code-reviewer.md
+    trigger: { type: ticket, statuses: ["Tech Review"] }
+    model: "${SENTINEL_REVIEWER_MODEL:}"   # empty -> default model, separate context
+    shell: true                             # needed to run SAST / dependency / secrets scans
+
+  09-deployment:
+    doc: docs/09-deployment.md
+    trigger: { type: queue, statuses: ["Tech Review Accepted", "Internal Review Accepted"] }
+    shell: true
+    min_interval_seconds: 1800   # batch cadence; the force_deploy label bypasses it
+
+  10-qa:
+    doc: docs/10-qa.md
+    trigger: { type: ticket, statuses: ["Internal Review"] }
+    shell: true                  # browser automation / curl against the Test server
+
+  11-client-review-facilitator:
+    doc: docs/11-client-review-facilitator.md
+    trigger: { type: ticket, statuses: ["Client Review"] }
+
+  12-release:
+    doc: docs/12-release.md
+    trigger: { type: queue, statuses: ["Client Review Accepted"], condition: release_window }
+    shell: true
+
+  13-rework-router:
+    doc: docs/13-rework-router.md
+    trigger: { type: ticket, statuses: ["Rework"] }
+
+# Project-specific commands the shell-enabled roles are told about in their prompt.
+# Fill these in for your project; agents run them via run_command inside the workspace.
+commands:
+  clone: ""            # e.g. git clone https://user:${GIT_TOKEN}@git.example.com/org/repo.git .
+  test: ""             # e.g. npm ci && npm test
+  deploy_test: ""      # e.g. ./deploy.sh test <build>
+  deploy_staging: ""   # e.g. ./deploy.sh staging <build>
+  deploy_production: "" # e.g. ./deploy.sh prod <build>
+  smoke_test: ""       # e.g. ./smoke.sh <env>
+  rollback: ""         # e.g. ./rollback.sh <env> <build>
