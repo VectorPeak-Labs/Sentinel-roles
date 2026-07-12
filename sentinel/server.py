@@ -47,6 +47,16 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Sentinel", version=__version__, lifespan=lifespan)
 
+# Strong references to fire-and-forget tasks: asyncio only keeps weak refs to
+# running tasks, so an unreferenced webhook handler could be GC'd mid-flight.
+_background: set[asyncio.Task] = set()
+
+
+def _spawn_background(coro) -> None:
+    task = asyncio.create_task(coro)
+    _background.add(task)
+    task.add_done_callback(_background.discard)
+
 
 @app.get("/health")
 async def health() -> dict:
@@ -70,7 +80,7 @@ async def jira_webhook(request: Request, token: str = "") -> dict:
     except Exception:
         raise HTTPException(status_code=400, detail="invalid JSON")
     # Handle asynchronously — Jira expects a fast 200.
-    asyncio.create_task(orchestrator.handle_webhook(event))
+    _spawn_background(orchestrator.handle_webhook(event))
     return {"accepted": True}
 
 
@@ -79,5 +89,5 @@ async def trigger_sweep(token: str = "") -> dict:
     """Manually trigger a board sweep (same auth as the webhook)."""
     if settings.webhook_secret and token != settings.webhook_secret:
         raise HTTPException(status_code=403, detail="bad token")
-    asyncio.create_task(orchestrator.sweep())
+    _spawn_background(orchestrator.sweep())
     return {"sweeping": True}

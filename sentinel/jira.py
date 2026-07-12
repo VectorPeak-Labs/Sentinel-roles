@@ -67,8 +67,9 @@ class JiraClient:
             payload = {"jql": jql, "startAt": start, "maxResults": min(max_results - len(issues), 50),
                        "fields": fields.split(",")}
             data = (await self._request("POST", "/search", json=payload)).json()
-            issues.extend(data.get("issues", []))
-            if len(issues) >= min(max_results, data.get("total", 0)):
+            page = data.get("issues", [])
+            issues.extend(page)
+            if not page or len(issues) >= min(max_results, data.get("total", 0)):
                 return issues
             start = len(issues)
 

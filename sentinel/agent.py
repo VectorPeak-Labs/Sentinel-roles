@@ -148,10 +148,16 @@ class AgentRunner:
         for turn in range(self.settings.max_agent_turns):
             msg = await self.llm.chat(messages, tools=tools, model=role.model)
             tool_calls = msg.tool_calls or []
+            # Serialize only the canonical tool-call shape — model_dump() can carry
+            # provider-specific extras that other LiteLLM backends reject on replay.
             messages.append({
                 "role": "assistant",
                 "content": msg.content or "",
-                **({"tool_calls": [tc.model_dump() for tc in tool_calls]} if tool_calls else {}),
+                **({"tool_calls": [
+                    {"id": tc.id, "type": "function",
+                     "function": {"name": tc.function.name,
+                                  "arguments": tc.function.arguments}}
+                    for tc in tool_calls]} if tool_calls else {}),
             })
 
             if not tool_calls:
