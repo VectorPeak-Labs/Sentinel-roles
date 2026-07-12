@@ -107,7 +107,10 @@ class AgentRunner:
                 log.info("dispatch of %s on %s aborted: %s", role.role_id, ticket, e)
                 return
 
-        heartbeat_task = asyncio.create_task(self._heartbeat_loop(ctx)) if ticket else None
+        # Queue roles claim tickets mid-run (claim_ticket), so the heartbeat task
+        # runs for every role — otherwise a long deploy/release batch would have
+        # its leases reclaimed by the sweep while still working.
+        heartbeat_task = asyncio.create_task(self._heartbeat_loop(ctx))
         self.audit.record("dispatch", role=role.role_id, ticket=ticket)
         try:
             await self._loop(ctx, kickoff)
@@ -129,14 +132,20 @@ class AgentRunner:
     async def _heartbeat_loop(self, ctx: ToolContext) -> None:
         while True:
             await asyncio.sleep(self.settings.heartbeat_interval)
+            await self._heartbeat_once(ctx)
+
+    async def _heartbeat_once(self, ctx: ToolContext) -> None:
+        """Refresh every lease this run holds: the role's own ticket plus any
+        tickets a queue role claimed with claim_ticket."""
+        for key in ([ctx.ticket] if ctx.ticket else []) + list(ctx.extra_leased):
             try:
-                await self.leases.heartbeat(ctx.ticket, ctx.role.role_id)
+                await self.leases.heartbeat(key, ctx.role.role_id)
             except LeaseError:
-                log.warning("heartbeat lost lease on %s — a human or the orchestrator "
-                            "intervened", ctx.ticket)
-                return
+                # Humans win: someone took the lease — stop touching that ticket.
+                log.warning("lease on %s lost (human or orchestrator intervened)", key)
+                ctx.extra_leased.discard(key)
             except Exception:
-                log.exception("heartbeat failed for %s", ctx.ticket)
+                log.exception("heartbeat failed for %s", key)
 
     async def _loop(self, ctx: ToolContext, kickoff: str) -> None:
         role = ctx.role

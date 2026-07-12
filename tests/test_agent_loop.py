@@ -143,6 +143,84 @@ def test_llm_crash_releases_lease_and_bumps_retries(settings, tmp_path):
     assert jira.transitions == []
 
 
+def planner_handoff_yaml(key):
+    return yaml.safe_dump({"agent_handoff": {
+        "role": "06-sprint-planner", "ticket": key,
+        "timestamp": "2026-07-12T10:00:00+00:00", "verdict": "pass",
+        "from_status": "To Do", "to_status": "In Progress",
+        "checklist": [{"id": "PLN-1", "result": "pass", "evidence": "comment-1"}],
+        "outputs": {}, "assumptions": [],
+    }})
+
+
+def planner_transition(call_id, key):
+    return tool_call(call_id, "transition_with_handoff", {
+        "key": key, "to_status": "In Progress", "summary": "planned",
+        "handoff_yaml": planner_handoff_yaml(key)})
+
+
+def test_queue_role_claims_and_transitions_multiple_tickets(settings, tmp_path):
+    jira = FakeJira()
+    seed_ticket(jira, "SENT-1", "To Do")
+    seed_ticket(jira, "SENT-2", "To Do")
+    llm = FakeLLM(script=[
+        llm_msg(tool_calls=[tool_call("c1", "claim_ticket", {"key": "SENT-1"}),
+                            tool_call("c2", "claim_ticket", {"key": "SENT-2"})]),
+        # transitions are NOT terminal for queue roles — the run continues
+        llm_msg(tool_calls=[planner_transition("t1", "SENT-1")]),
+        llm_msg(tool_calls=[planner_transition("t2", "SENT-2")]),
+        llm_msg(tool_calls=[tool_call("f1", "finish_run", {"summary": "queue drained"})]),
+    ])
+    runner = make_runner(settings, jira, llm, tmp_path)
+
+    asyncio.run(runner.run(settings.roles["06-sprint-planner"], None, "queue kickoff"))
+
+    assert jira.transitions == [("SENT-1", "In Progress"), ("SENT-2", "In Progress")]
+    assert llm.calls == 4                               # finish_run ended the loop
+    # no lease residue anywhere
+    assert not any(prop == PROP_LEASE for _, prop in jira.properties)
+    assert "agent-leased" not in jira.labels.get("SENT-1", set())
+    assert "agent-leased" not in jira.labels.get("SENT-2", set())
+
+
+def test_queue_role_transition_refused_without_claim(settings, tmp_path):
+    jira = FakeJira()
+    seed_ticket(jira, "SENT-1", "To Do")
+    llm = FakeLLM(script=[
+        llm_msg(tool_calls=[planner_transition("t1", "SENT-1")]),  # no claim first
+        llm_msg(tool_calls=[tool_call("f1", "finish_run", {"summary": "done"})]),
+    ])
+    runner = make_runner(settings, jira, llm, tmp_path)
+
+    asyncio.run(runner.run(settings.roles["06-sprint-planner"], None, "queue kickoff"))
+
+    assert jira.transitions == []
+
+
+def test_heartbeat_covers_queue_claimed_tickets(settings, tmp_path):
+    from sentinel.tools import ToolContext
+
+    jira = FakeJira()
+    runner = make_runner(settings, jira, FakeLLM(), tmp_path)
+    ctx = ToolContext(jira=jira, llm=runner.llm, leases=runner.leases,
+                      settings=settings, audit=runner.audit,
+                      role=settings.roles["06-sprint-planner"], ticket=None,
+                      workspace=tmp_path)
+
+    async def main():
+        await runner.leases.claim("SENT-1", "06-sprint-planner")
+        ctx.extra_leased.add("SENT-1")
+        jira.properties[("SENT-1", PROP_LEASE)]["heartbeat"] = "2020-01-01T00:00:00+00:00"
+        await runner._heartbeat_once(ctx)
+        assert jira.properties[("SENT-1", PROP_LEASE)]["heartbeat"] > "2020-01-02"
+        # lease taken over by someone else -> dropped from this run's holdings
+        jira.properties[("SENT-1", PROP_LEASE)] = {"role": "somebody-else"}
+        await runner._heartbeat_once(ctx)
+        assert "SENT-1" not in ctx.extra_leased
+
+    asyncio.run(main())
+
+
 def test_dispatch_aborts_if_ticket_actively_leased(settings, tmp_path):
     jira = FakeJira()
     seed_ticket(jira)
