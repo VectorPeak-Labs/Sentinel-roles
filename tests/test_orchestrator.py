@@ -31,48 +31,7 @@ def settings(monkeypatch):
     return load_settings("config/pipeline.yml")
 
 
-class FakeJira:
-    def __init__(self):
-        self.properties: dict[tuple[str, str], object] = {}
-        self.labels: dict[str, set[str]] = {}
-        self.comments: dict[str, list[str]] = {}
-
-    async def myself(self):
-        return {"name": "sentinel-bot"}
-
-    async def get_property(self, key, prop):
-        return self.properties.get((key, prop))
-
-    async def set_property(self, key, prop, value):
-        self.properties[(key, prop)] = value
-
-    async def delete_property(self, key, prop):
-        self.properties.pop((key, prop), None)
-
-    async def update_labels(self, key, add=None, remove=None):
-        labels = self.labels.setdefault(key, set())
-        labels.update(add or [])
-        labels.difference_update(remove or [])
-
-    async def add_comment(self, key, body):
-        self.comments.setdefault(key, []).append(body)
-        return {"id": str(len(self.comments[key]))}
-
-    async def get_comments(self, key):
-        return [{"body": b} for b in self.comments.get(key, [])]
-
-    async def assign(self, key, username):
-        pass
-
-    async def search(self, jql, max_results=100, fields=None):
-        return []
-
-    async def get_issue(self, key, with_comments=True):
-        self.get_issue_calls = getattr(self, "get_issue_calls", 0) + 1
-        return self.issues.get(key, {"key": key, "fields": {"status": {"name": "In Progress"},
-                                                            "labels": []}})
-
-    issues: dict[str, dict] = {}
+from fakes import FakeJira
 
 
 class FakeRunner:
