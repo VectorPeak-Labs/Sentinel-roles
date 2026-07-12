@@ -61,9 +61,12 @@ def _spawn_background(coro) -> None:
 @app.get("/health")
 async def health() -> dict:
     return {
-        "status": "ok",
+        "status": "ok" if orchestrator.agent_user else "starting",
         "version": __version__,
         "agent_user": orchestrator.agent_user,
+        "last_sweep_at": orchestrator.last_sweep_at,
+        "sweep_count": orchestrator.sweep_count,
+        "pending_webhook_evaluations": len(orchestrator._pending_keys),
         "running_agents": [
             {"role": role_id, "ticket": ticket}
             for (role_id, ticket) in orchestrator.running

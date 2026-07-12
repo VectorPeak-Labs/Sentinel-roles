@@ -54,6 +54,14 @@ class Orchestrator:
         self._queue_last_run: dict[str, float] = {}
         self._lock = asyncio.Lock()
         self._stopped = asyncio.Event()
+        # Webhook debounce: bursts of events (batch edits, comment storms) coalesce
+        # into one evaluation pass instead of one full queue re-search per event.
+        self.webhook_debounce_seconds = 2.0
+        self._pending_keys: set[str] = set()
+        self._flush_task: asyncio.Task | None = None
+        # /health diagnostics
+        self.last_sweep_at: str | None = None
+        self.sweep_count = 0
 
     async def start(self) -> None:
         me = await self.jira.myself()
@@ -118,6 +126,8 @@ class Orchestrator:
             f"ORDER BY updated ASC", max_results=500)
         log.info("sweep: %d ticket(s) in agent-owned statuses, %d agent(s) running",
                  len(issues), len(self.running))
+        self.last_sweep_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        self.sweep_count += 1
         async with self._lock:
             for issue in issues:
                 try:
@@ -313,20 +323,39 @@ class Orchestrator:
             # A human commented — possibly the reply an agent is waiting for.
             log.info("human comment on %s by %s", key, actor)
 
-        # Any activity: re-evaluate this ticket + the queues immediately
+        # Any activity: queue this ticket for a debounced evaluation pass
         # (webhooks are the fast path; the sweep remains the safety net).
-        try:
-            fresh = await self.jira.get_issue(key, with_comments=False)
-            async with self._lock:
-                self._gc_running()
-                await self._evaluate_ticket(fresh)
-                statuses = ", ".join(f'"{s}"' for s in self.settings.agent_statuses)
-                queue_issues = await self.jira.search(
-                    f"project = {self.settings.jira_project} AND status in ({statuses})",
-                    max_results=500)
-                await self._evaluate_queues(queue_issues)
-        except JiraError as e:
-            log.error("webhook re-evaluation of %s failed: %s", key, e)
+        self._pending_keys.add(key)
+        if self._flush_task is None or self._flush_task.done():
+            self._flush_task = asyncio.create_task(self._flush_pending(),
+                                                   name="webhook-flush")
+
+    async def _flush_pending(self) -> None:
+        """Drain the debounced webhook queue: one evaluation pass per burst."""
+        while True:
+            await asyncio.sleep(self.webhook_debounce_seconds)
+            keys = set(self._pending_keys)
+            self._pending_keys.clear()
+            if not keys:
+                return
+            try:
+                async with self._lock:
+                    self._gc_running()
+                    for key in keys:
+                        try:
+                            fresh = await self.jira.get_issue(key, with_comments=False)
+                            await self._evaluate_ticket(fresh)
+                        except JiraError as e:
+                            log.error("webhook re-evaluation of %s failed: %s", key, e)
+                    statuses = ", ".join(f'"{s}"' for s in self.settings.agent_statuses)
+                    queue_issues = await self.jira.search(
+                        f"project = {self.settings.jira_project} AND status in ({statuses})",
+                        max_results=500)
+                    await self._evaluate_queues(queue_issues)
+            except Exception:
+                log.exception("webhook flush failed")
+            if not self._pending_keys:
+                return
 
     async def _on_status_change(self, key: str, actor: str, change: dict) -> None:
         to_status = change.get("toString", "")

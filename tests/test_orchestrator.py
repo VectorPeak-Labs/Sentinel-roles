@@ -68,7 +68,11 @@ class FakeJira:
         return []
 
     async def get_issue(self, key, with_comments=True):
-        return {"key": key, "fields": {"status": {"name": "In Progress"}, "labels": []}}
+        self.get_issue_calls = getattr(self, "get_issue_calls", 0) + 1
+        return self.issues.get(key, {"key": key, "fields": {"status": {"name": "In Progress"},
+                                                            "labels": []}})
+
+    issues: dict[str, dict] = {}
 
 
 class FakeRunner:
@@ -241,6 +245,24 @@ def test_agent_transition_with_valid_payload_accepted(settings, tmp_path):
     # clean stage exit resets the crash-retry budget
     assert ("SENT-1", PROP_RETRIES) not in jira.properties
 
+
+def test_webhook_burst_coalesces_into_one_evaluation(settings, tmp_path):
+    jira = FakeJira()
+    jira.issues = {"SENT-1": issue("SENT-1", "Business Requirements")}
+    orch = make_orchestrator(settings, jira, tmp_path)
+    orch.webhook_debounce_seconds = 0.01
+
+    async def main():
+        event = {"issue": {"key": "SENT-1"}, "user": {"name": "alice"},
+                 "comment": {"body": "hi"}}
+        for _ in range(5):  # comment storm
+            await orch.handle_webhook(event)
+        await orch._flush_task
+        await asyncio.sleep(0)
+
+    asyncio.run(main())
+    # five events, one dispatch (later events see the ticket already running/leased)
+    assert orch.runner.runs == [("03-business-analyst", "SENT-1")]
 
 def test_human_transition_honored_without_validation(settings, tmp_path):
     jira = FakeJira()
