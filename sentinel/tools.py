@@ -506,7 +506,9 @@ async def _run_command(ctx: ToolContext, args: dict) -> ToolResult:
     if not ctx.role.shell:
         return ToolResult("ERROR: this role has no shell access")
     cwd = (ctx.workspace / (args.get("cwd") or ".")).resolve()
-    if not str(cwd).startswith(str(ctx.workspace.resolve())):
+    # Path-aware containment check — a string prefix comparison would accept
+    # sibling directories that share the prefix (workspace "07" vs "07-evil").
+    if not cwd.is_relative_to(ctx.workspace.resolve()):
         return ToolResult("ERROR: cwd must stay inside the workspace")
     cwd.mkdir(parents=True, exist_ok=True)
     timeout = min(int(args.get("timeout_seconds") or 600), 1800)
