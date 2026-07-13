@@ -53,7 +53,9 @@ Humans steer the pipeline entirely through Jira labels:
 | `release-now` | open a production release window (role 12) — releases never fire on their own |
 
 Agents ask questions and deliver packets as ticket comments; reply in comments and the
-ticket wakes the responsible agent (via webhook, or on the next sweep).
+ticket wakes the responsible agent (via webhook, or on the next sweep). File evidence
+(screenshots, scan reports, evidence bundles) is exchanged as ticket attachments, which
+agents read and upload themselves.
 
 ## How it works
 

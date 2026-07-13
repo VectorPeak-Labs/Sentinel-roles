@@ -57,7 +57,8 @@ class JiraClient:
     # -- issues --------------------------------------------------------------
 
     async def get_issue(self, key: str, with_comments: bool = True) -> dict:
-        fields = ISSUE_FIELDS + (",comment" if with_comments else "")
+        # Single-issue reads include attachments (evidence files); searches stay light.
+        fields = ISSUE_FIELDS + ",attachment" + (",comment" if with_comments else "")
         return (await self._request("GET", f"/issue/{key}", params={"fields": fields})).json()
 
     async def search(self, jql: str, max_results: int = 100, fields: str = ISSUE_FIELDS) -> list[dict]:
@@ -111,6 +112,29 @@ class JiraClient:
         data = (await self._request("GET", f"/issue/{key}/comment",
                                     params={"maxResults": 200})).json()
         return data.get("comments", [])
+
+    # -- attachments (evidence files) ------------------------------------------
+
+    async def download_attachment(self, content_url: str) -> bytes:
+        """Fetch attachment binary content. The URL comes from the issue's
+        attachment metadata and must stay on this Jira host (the PAT rides on
+        every request from this client — never send it elsewhere)."""
+        if not content_url.startswith(self.base_url + "/"):
+            raise JiraError(400, f"attachment URL is not on {self.base_url}: {content_url}")
+        resp = await self._client.get(content_url, follow_redirects=True)
+        if resp.status_code >= 400:
+            raise JiraError(resp.status_code, resp.text[:2000])
+        return resp.content
+
+    async def upload_attachment(self, key: str, filename: str, data: bytes,
+                                content_type: str = "application/octet-stream") -> list[dict]:
+        # X-Atlassian-Token: no-check is required to pass Jira's XSRF guard on
+        # multipart uploads.
+        resp = await self._request(
+            "POST", f"/issue/{key}/attachments",
+            headers={"X-Atlassian-Token": "no-check"},
+            files={"file": (filename, data, content_type)})
+        return resp.json()
 
     # -- labels / assignee ---------------------------------------------------
 

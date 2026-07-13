@@ -10,6 +10,8 @@ class FakeJira:
         self.labels: dict[str, set[str]] = {}
         self.comments: dict[str, list[str]] = {}
         self.issues: dict[str, dict] = {}
+        # key -> [{"id", "filename", "size", "mimeType", "content" (url), "data"}]
+        self.attachments: dict[str, list[dict]] = {}
         self.transitions: list[tuple[str, str]] = []
         self.allowed_targets: dict[str, list[str]] = {}
         self.get_issue_calls = 0
@@ -47,8 +49,28 @@ class FakeJira:
 
     async def get_issue(self, key, with_comments=True):
         self.get_issue_calls += 1
-        return self.issues.get(key, {"key": key, "fields": {
+        issue = self.issues.get(key, {"key": key, "fields": {
             "status": {"name": "In Progress"}, "labels": []}})
+        atts = self.attachments.get(key)
+        if atts:
+            issue.setdefault("fields", {})["attachment"] = [
+                {k: v for k, v in a.items() if k != "data"} for a in atts]
+        return issue
+
+    async def upload_attachment(self, key, filename, data, content_type="application/octet-stream"):
+        atts = self.attachments.setdefault(key, [])
+        att = {"id": str(len(atts) + 1), "filename": filename, "size": len(data),
+               "mimeType": content_type, "data": data,
+               "content": f"https://jira.example.com/secure/attachment/{key}/{len(atts) + 1}"}
+        atts.append(att)
+        return [{k: v for k, v in att.items() if k != "data"}]
+
+    async def download_attachment(self, content_url):
+        for atts in self.attachments.values():
+            for a in atts:
+                if a["content"] == content_url:
+                    return a["data"]
+        raise RuntimeError(f"no attachment at {content_url}")
 
     # Per-ticket allowed transition targets; unset keys fall back to the full
     # pipeline (permissive default keeps most tests focused on other behavior).

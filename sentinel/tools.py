@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import mimetypes
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -30,6 +31,16 @@ log = logging.getLogger("sentinel.tools")
 
 MAX_TOOL_OUTPUT = 30_000
 MAX_COMMENTS = 30
+MAX_ATTACHMENT_BYTES = 20_000_000
+
+# MIME types whose content is returned inline by get_attachment (everything else
+# is binary: saved to the workspace only).
+_TEXT_MIME_EXTRA = {"application/json", "application/xml", "application/yaml",
+                    "application/x-yaml", "image/svg+xml"}
+
+
+def _is_text_mime(mime: str) -> bool:
+    return mime.startswith("text/") or mime in _TEXT_MIME_EXTRA
 
 
 def _now_iso() -> str:
@@ -96,6 +107,19 @@ BASE_TOOLS = [
           {"key": _S, "body": _S}, ["key", "body"]),
     _tool("set_labels", "Add and/or remove labels on a ticket.",
           {"key": _S, "add": _SL, "remove": _SL}, ["key"]),
+    _tool("get_attachment", "Download a ticket attachment (ids/filenames are listed by "
+          "get_ticket). The file is saved into the workspace under attachments/; text "
+          "content (text/*, json, xml, yaml, svg) is additionally returned inline.",
+          {"key": _S, "attachment_id": _S}, ["key", "attachment_id"]),
+    _tool("attach_file", "Attach a file to a ticket — the evidence channel of universal "
+          "rule 5 (screenshots, scan reports, requirement documents, evidence bundles). "
+          "Provide EITHER path (an existing file inside the workspace, e.g. produced by "
+          "run_command) OR content (inline text) plus a filename.",
+          {"key": _S,
+           "path": {"type": "string", "description": "Workspace-relative path of the file to upload"},
+           "content": {"type": "string", "description": "Inline text content (alternative to path)"},
+           "filename": {"type": "string", "description": "Attachment filename (defaults to the path's basename)"}},
+          ["key"]),
     _tool("create_ticket", "Create a new ticket in the project (follow-ups, new-scope "
           "requests, split slices). It lands in the icebox (initial status).",
           {"summary": _S, "description": _S, "issue_type": {"type": "string",
@@ -241,6 +265,12 @@ async def _get_ticket(ctx: ToolContext, args: dict) -> ToolResult:
              "inward": (l.get("inwardIssue") or {}).get("key")}
             for l in f.get("issuelinks", [])
         ],
+        "attachments": [
+            {"id": a.get("id"), "filename": a.get("filename"), "size": a.get("size"),
+             "mime_type": a.get("mimeType"),
+             "author": (a.get("author") or {}).get("name"), "created": a.get("created")}
+            for a in f.get("attachment") or []
+        ],
         "sentinel_state": state,
         "comments": [
             {"author": (c.get("author") or {}).get("name"),
@@ -280,6 +310,71 @@ async def _set_labels(ctx: ToolContext, args: dict) -> ToolResult:
     remove = [l for l in args.get("remove") or [] if l not in protected]
     await ctx.jira.update_labels(args["key"], add=add, remove=remove)
     return ToolResult(f"labels updated: +{add} -{remove}")
+
+
+async def _get_attachment(ctx: ToolContext, args: dict) -> ToolResult:
+    key, att_id = args["key"], str(args["attachment_id"])
+    issue = await ctx.jira.get_issue(key, with_comments=False)
+    attachments = (issue.get("fields") or {}).get("attachment") or []
+    meta = next((a for a in attachments if str(a.get("id")) == att_id), None)
+    if meta is None:
+        ids = [f"{a.get('id')}:{a.get('filename')}" for a in attachments]
+        return ToolResult(f"ERROR: no attachment with id {att_id} on {key}. "
+                          f"Available: {ids or 'none'}")
+    if int(meta.get("size") or 0) > MAX_ATTACHMENT_BYTES:
+        return ToolResult(f"ERROR: attachment is {meta.get('size')} bytes "
+                          f"(limit {MAX_ATTACHMENT_BYTES})")
+    data = await ctx.jira.download_attachment(meta.get("content") or "")
+
+    # Path(...).name strips any directory components a hostile filename could
+    # carry — the file must land inside workspace/attachments, nowhere else.
+    filename = Path(meta.get("filename") or f"attachment-{att_id}").name or f"attachment-{att_id}"
+    dest_dir = ctx.workspace / "attachments"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / filename
+    dest.write_bytes(data)
+
+    mime = meta.get("mimeType") or ""
+    out = (f"saved '{filename}' ({len(data)} bytes, {mime or 'unknown type'}) "
+           f"to attachments/{filename} in the workspace")
+    if _is_text_mime(mime):
+        try:
+            return ToolResult(_truncate(out + "\n--- content ---\n" + data.decode("utf-8")))
+        except UnicodeDecodeError:
+            pass
+    return ToolResult(out)
+
+
+async def _attach_file(ctx: ToolContext, args: dict) -> ToolResult:
+    key = args["key"]
+    path_arg, content = args.get("path"), args.get("content")
+    if bool(path_arg) == (content is not None):
+        return ToolResult("ERROR: provide exactly one of `path` (workspace file) or "
+                          "`content` (inline text)")
+    if path_arg:
+        # Same path-aware containment rule as run_command's cwd.
+        src = (ctx.workspace / path_arg).resolve()
+        if not src.is_relative_to(ctx.workspace.resolve()):
+            return ToolResult("ERROR: path must stay inside the workspace")
+        if not src.is_file():
+            return ToolResult(f"ERROR: no such file in the workspace: {path_arg}")
+        data = src.read_bytes()
+        filename = Path(args.get("filename") or src.name).name
+    else:
+        if not str(args.get("filename") or "").strip():
+            return ToolResult("ERROR: filename is required with inline content")
+        data = str(content).encode("utf-8")
+        filename = Path(args["filename"]).name
+    if not filename:
+        return ToolResult("ERROR: filename must not be empty")
+    if len(data) > MAX_ATTACHMENT_BYTES:
+        return ToolResult(f"ERROR: file is {len(data)} bytes (limit {MAX_ATTACHMENT_BYTES})")
+
+    mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    await ctx.jira.upload_attachment(key, filename, data, content_type=mime)
+    ctx.audit.record("attachment_uploaded", role=ctx.role.role_id, ticket=key,
+                     filename=filename, size=len(data))
+    return ToolResult(f"attached '{filename}' ({len(data)} bytes, {mime}) to {key}")
 
 
 async def _create_ticket(ctx: ToolContext, args: dict) -> ToolResult:
@@ -561,6 +656,8 @@ _HANDLERS = {
     "search_tickets": _search_tickets,
     "add_comment": _add_comment,
     "set_labels": _set_labels,
+    "get_attachment": _get_attachment,
+    "attach_file": _attach_file,
     "create_ticket": _create_ticket,
     "link_tickets": _link_tickets,
     "assign_ticket": _assign_ticket,
