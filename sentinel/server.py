@@ -31,7 +31,9 @@ logging.basicConfig(
 jira = JiraClient(settings.jira_base_url, settings.jira_pat,
                   max_retries=settings.jira_max_retries)
 llm = LLM(settings.litellm_base_url, settings.litellm_api_key, settings.default_model)
-audit = AuditLog(settings.data_dir / "audit.jsonl")
+audit = AuditLog(settings.data_dir / "audit.jsonl",
+                 max_bytes=settings.audit_max_bytes,
+                 backup_count=settings.audit_backup_count)
 notifier = Notifier(settings.alert_webhook_url, settings.jira_base_url)
 orchestrator = Orchestrator(settings, jira, llm, audit, notifier)
 

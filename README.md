@@ -145,6 +145,9 @@ as the only channel (or wire your own automation on the `needs-human` label inst
 
 Audit trail: `docker compose exec sentinel tail -f /data/audit.jsonl` — every dispatch,
 transition, reclaim and escalation (mirrored to Jira comments where the docs require it).
+The file is size-rotated (`audit.jsonl.1 … .N`, default 50 MB × 5 generations) so it can't
+fill the `/data` volume; tune with `SENTINEL_AUDIT_MAX_BYTES` / `SENTINEL_AUDIT_BACKUP_COUNT`
+(set max bytes to `0` for a single unbounded file).
 
 ## Development
 

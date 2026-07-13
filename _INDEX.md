@@ -51,7 +51,7 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   ├── llm.py                 # thin AsyncOpenAI wrapper pointed at LiteLLM
 │   ├── notify.py              # outbound alert channel: POST escalations/pause to a webhook (Slack-compatible)
 │   ├── config.py              # env settings + config/pipeline.yml loader (RoleConfig, Settings)
-│   ├── audit.py               # append-only JSONL audit log (thread-locked)
+│   ├── audit.py               # append-only JSONL audit log (thread-locked); size-rotated with retention
 │   └── doctor.py              # pre-flight CLI: Jira/project/statuses/LiteLLM/role-doc checks
 ├── config/pipeline.yml        # THE dispatch table: role triggers, WIP limits, labels, models, project commands
 ├── docs/                      # role goal documents — these ARE the agents' system prompts
@@ -72,6 +72,7 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   └── test_attachments.py    # evidence channel: attach_file/get_attachment + containment
 │   └── test_notify.py         # outbound alert channel: payload shape, disabled default, error-swallowing
 │   └── test_jira_retry.py     # transient-failure retry: 429/5xx, transport errors, idempotency, give-up
+│   └── test_audit.py          # audit rotation: size trigger, retention cap, no recent-record loss, disabled mode
 ├── conftest.py                # inserts repo root into sys.path (bare `pytest` support)
 ├── Dockerfile                 # python:3.12-slim + git/curl (for shell roles); entrypoint serve|doctor
 ├── docker-compose.yml         # sentinel service (port 8080, docs+config mounted ro, /data volume) + doctor profile
@@ -242,7 +243,8 @@ Optional: `SENTINEL_DEFAULT_MODEL` (default `gpt-4o`), `SENTINEL_REVIEWER_MODEL`
 `DATA_DIR` (/data), `DOCS_DIR` (docs), `SENTINEL_CONFIG`
 (config/pipeline.yml), `SENTINEL_SWEEP_INTERVAL` (900), `SENTINEL_LEASE_TIMEOUT` (1800),
 `SENTINEL_HEARTBEAT_INTERVAL` (600), `SENTINEL_MAX_AGENT_TURNS` (80),
-`SENTINEL_JIRA_MAX_RETRIES` (3), `SENTINEL_LOG_LEVEL`.
+`SENTINEL_JIRA_MAX_RETRIES` (3), `SENTINEL_AUDIT_MAX_BYTES` (50 MB; 0 = unbounded),
+`SENTINEL_AUDIT_BACKUP_COUNT` (5), `SENTINEL_LOG_LEVEL`.
 
 **`config/pipeline.yml`** supports `${VAR}` / `${VAR:default}` expansion (recursive, done
 in `config._expand_env`). Defines: `rework_limit` (2), `split_threshold_points` (8),
@@ -300,6 +302,11 @@ is tested end to end without a model.
   reasoning-quality layer (8 disciplines + a 5-question self-test) loaded into every agent.
 - Jira **Server/DC v2 API only** (PAT bearer, username-based assignee, `{code}` comment
   macros); search uses POST /search with 50-per-page pagination.
+- **The audit log is bounded**: `audit.py` size-rotates `audit.jsonl` (default 50 MB ×
+  5 generations) so the append-only trail cannot silently fill the `/data` volume it shares
+  with agent workspaces and `pause.json`; rotation itself is best-effort (a failure is
+  logged, never raised into a dispatch/escalation path). `SENTINEL_AUDIT_MAX_BYTES=0` keeps
+  the historical single unbounded file.
 - **Transient Jira failures are absorbed, not surfaced**: `JiraClient._request` retries
   429/502/503/504 (any method) and network errors (idempotent methods only — a mutating
   POST is never blindly retried) with capped exponential backoff + jitter, honoring
