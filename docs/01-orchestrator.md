@@ -32,6 +32,20 @@ At any point in time, all of the following hold — this is the checklist the Or
 
 Any violated invariant is repaired if mechanical (reclaim, requeue) or escalated if not.
 
+## Global pause (operational kill-switch)
+Independent of any single ticket, an operator can freeze the entire pipeline via `POST /pause`
+(and lift it with `POST /resume`). While paused:
+- **No new agents are dispatched** — neither ticket-triggered roles nor queue singletons. The
+  board sweep still runs (so `/health` keeps surfacing Jira reachability), but it takes no
+  dispatch or repair action.
+- **In-flight runs drain**: agents already running are not cancelled; they finish their current
+  transition and release their own leases normally.
+- The freeze is **persisted** (`DATA_DIR/pause.json`): a container restart mid-incident stays
+  paused until an explicit `/resume`, so a bounce never silently re-starts the pipeline.
+
+Use it for incidents, a bad model rollout, or a maintenance window — it is the whole-pipeline
+counterpart to the per-ticket `needs-human` freeze.
+
 ## Failure paths
 - Agent crash / timeout → reclaim, retry once, then escalate (`ORC-2`).
 - Two agents claim one ticket → cancel the later lease, log the race.

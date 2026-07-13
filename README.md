@@ -57,6 +57,20 @@ ticket wakes the responsible agent (via webhook, or on the next sweep). File evi
 (screenshots, scan reports, evidence bundles) is exchanged as ticket attachments, which
 agents read and upload themselves.
 
+Those labels steer individual tickets. To freeze the **whole** pipeline at once — an
+incident, a bad model rollout, a maintenance window — use the pause control instead of
+labelling every ticket or killing the container:
+
+```bash
+curl -X POST "http://<sentinel-host>:8080/pause?token=<WEBHOOK_SECRET>&reason=incident-1234"
+curl -X POST "http://<sentinel-host>:8080/resume?token=<WEBHOOK_SECRET>"
+```
+
+While paused the Orchestrator dispatches no new agents (ticket or queue); agents already
+running **drain to completion** rather than being killed mid-transition. The pause is
+persisted to `DATA_DIR/pause.json`, so a container restart during an incident stays frozen
+until you explicitly `/resume`. `GET /health` reports `"status": "paused"` with the reason.
+
 ## How it works
 
 ```
@@ -101,9 +115,11 @@ alert on that label (e.g. Jira automation) if you want pings.
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /health` | liveness + currently running agents |
+| `GET /health` | liveness + pause state + currently running agents |
 | `POST /webhook/jira?token=…` | Jira webhook receiver |
 | `POST /sweep?token=…` | force an immediate board sweep |
+| `POST /pause?token=…&reason=…` | freeze all dispatch (in-flight runs drain); survives restart |
+| `POST /resume?token=…` | lift the pause and resume dispatching |
 
 Audit trail: `docker compose exec sentinel tail -f /data/audit.jsonl` — every dispatch,
 transition, reclaim and escalation (mirrored to Jira comments where the docs require it).

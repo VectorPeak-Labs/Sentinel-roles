@@ -9,6 +9,7 @@ escalates anything it cannot repair mechanically. It performs zero content work.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from datetime import datetime, timezone
@@ -64,6 +65,13 @@ class Orchestrator:
         self.sweep_count = 0
         self.consecutive_sweep_failures = 0
         self.last_sweep_error: str | None = None
+        # Global pause (operational kill-switch): when set, no NEW agents are
+        # dispatched (ticket or queue); in-flight runs drain to completion. The
+        # state is persisted to disk so a container restart mid-incident does not
+        # silently resume the pipeline.
+        self.paused = False
+        self.paused_at: str | None = None
+        self.pause_reason: str | None = None
 
     async def start(self) -> None:
         me = await self.jira.myself()
@@ -73,9 +81,61 @@ class Orchestrator:
                                    self.settings.lease_timeout)
         self.runner = AgentRunner(self.settings, self.jira, self.llm,
                                   self.leases, self.audit, self.agent_user)
-        log.info("orchestrator started as Jira user '%s', project %s, %d roles",
-                 self.agent_user, self.settings.jira_project, len(self.settings.roles))
-        self.audit.record("orchestrator_start", agent_user=self.agent_user)
+        self._load_pause_state()
+        log.info("orchestrator started as Jira user '%s', project %s, %d roles%s",
+                 self.agent_user, self.settings.jira_project, len(self.settings.roles),
+                 " (PAUSED)" if self.paused else "")
+        self.audit.record("orchestrator_start", agent_user=self.agent_user,
+                          paused=self.paused)
+
+    # -- global pause (operational kill-switch) -----------------------------
+
+    def _pause_file(self):
+        return self.settings.data_dir / "pause.json"
+
+    def _load_pause_state(self) -> None:
+        """Restore a pause set before a restart — an incident freeze must survive
+        a container bounce, never silently resume dispatching."""
+        try:
+            data = json.loads(self._pause_file().read_text(encoding="utf-8"))
+        except (FileNotFoundError, ValueError):
+            return
+        if data.get("paused"):
+            self.paused = True
+            self.paused_at = data.get("at")
+            self.pause_reason = data.get("reason")
+
+    def _persist_pause_state(self, by: str) -> None:
+        try:
+            self._pause_file().parent.mkdir(parents=True, exist_ok=True)
+            self._pause_file().write_text(json.dumps(
+                {"paused": True, "reason": self.pause_reason,
+                 "at": self.paused_at, "by": by}), encoding="utf-8")
+        except OSError as e:
+            # Persistence is best-effort: the in-memory pause still takes effect,
+            # but warn loudly because a restart would then resume unexpectedly.
+            log.warning("could not persist pause state to %s: %s", self._pause_file(), e)
+
+    async def pause(self, reason: str = "", by: str = "operator") -> None:
+        self.paused = True
+        self.paused_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        self.pause_reason = reason.strip() or None
+        self._persist_pause_state(by)
+        log.warning("pipeline PAUSED by %s: %s", by, self.pause_reason or "(no reason given)")
+        self.audit.record("pipeline_paused", by=by, reason=self.pause_reason)
+
+    async def resume(self, by: str = "operator") -> None:
+        self.paused = False
+        self.paused_at = None
+        self.pause_reason = None
+        try:
+            self._pause_file().unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            log.warning("could not clear pause file %s: %s", self._pause_file(), e)
+        log.warning("pipeline RESUMED by %s", by)
+        self.audit.record("pipeline_resumed", by=by)
 
     async def stop(self) -> None:
         self._stopped.set()
@@ -138,8 +198,8 @@ class Orchestrator:
         issues = await self.jira.search(
             f"project = {self.settings.jira_project} AND status in ({statuses}) "
             f"ORDER BY updated ASC", max_results=500)
-        log.info("sweep: %d ticket(s) in agent-owned statuses, %d agent(s) running",
-                 len(issues), len(self.running))
+        log.info("sweep: %d ticket(s) in agent-owned statuses, %d agent(s) running%s",
+                 len(issues), len(self.running), " [PAUSED]" if self.paused else "")
         self.last_sweep_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         self.sweep_count += 1
         async with self._lock:
@@ -161,6 +221,8 @@ class Orchestrator:
     # -- per-ticket dispatch ------------------------------------------------
 
     async def _evaluate_ticket(self, issue: dict) -> None:
+        if self.paused:
+            return  # global pause: dispatch nothing, take no side effects (drain)
         key = issue["key"]
         fields = issue.get("fields", {})
         status = (fields.get("status") or {}).get("name", "")
@@ -246,6 +308,8 @@ class Orchestrator:
     # -- queue roles ----------------------------------------------------------
 
     async def _evaluate_queues(self, issues: list[dict]) -> None:
+        if self.paused:
+            return  # global pause: no queue-role singletons while frozen
         by_status: dict[str, list[dict]] = {}
         for issue in issues:
             status = ((issue.get("fields") or {}).get("status") or {}).get("name", "")
