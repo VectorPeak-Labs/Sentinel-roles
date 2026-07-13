@@ -35,7 +35,8 @@ class FakeJira:
         return {"id": str(len(self.comments[key]))}
 
     async def get_comments(self, key):
-        return [{"body": b} for b in self.comments.get(key, [])]
+        return [{"id": str(i + 1), "body": b}
+                for i, b in enumerate(self.comments.get(key, []))]
 
     async def assign(self, key, username):
         pass

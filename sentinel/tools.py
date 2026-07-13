@@ -447,9 +447,11 @@ async def _increment_rework(ctx: ToolContext, args: dict) -> ToolResult:
     key = args["key"]
     comments = await ctx.jira.get_comments(key)
     rejection = None
+    rejection_comment_id = None
     for comment in reversed(comments):
         rejection = find_payload(comment.get("body") or "", "rework")
         if rejection:
+            rejection_comment_id = str(comment.get("id", ""))
             break
     if rejection is None:
         return ToolResult("ERROR: no `rework` rejection payload found in the ticket's "
@@ -461,20 +463,29 @@ async def _increment_rework(ctx: ToolContext, args: dict) -> ToolResult:
                           + "\nBounce back to the rejecting role with handoff-invalid.")
 
     state = await ctx.jira.get_property(key, PROP_REWORK) or {"count": 0, "history": []}
-    state["count"] = int(state.get("count", 0)) + 1
-    state["rejected_from"] = rejection["rejected_from"]
-    state.setdefault("history", []).append({
-        "at": _now_iso(), "rejected_from": rejection["rejected_from"],
-        "findings": [{"id": f.get("id"), "severity": f.get("severity"),
-                      "criterion_ref": f.get("criterion_ref"),
-                      "description": f.get("description")} for f in rejection["findings"]],
-    })
-    await ctx.jira.set_property(key, PROP_REWORK, state)
+
+    # Idempotency: a crashed/retried router run must not count the same rejection
+    # twice — phantom bounces would trip the loop-breaker early.
+    already_counted = (rejection_comment_id and
+                       state.get("last_counted_comment") == rejection_comment_id)
+    if not already_counted:
+        state["count"] = int(state.get("count", 0)) + 1
+        state["rejected_from"] = rejection["rejected_from"]
+        state["last_counted_comment"] = rejection_comment_id
+        state.setdefault("history", []).append({
+            "at": _now_iso(), "rejected_from": rejection["rejected_from"],
+            "findings": [{"id": f.get("id"), "severity": f.get("severity"),
+                          "criterion_ref": f.get("criterion_ref"),
+                          "description": f.get("description")} for f in rejection["findings"]],
+        })
+        await ctx.jira.set_property(key, PROP_REWORK, state)
     exceeded = state["count"] > ctx.settings.rework_limit
-    ctx.audit.record("rework_incremented", ticket=key, count=state["count"], exceeded=exceeded)
+    ctx.audit.record("rework_incremented", ticket=key, count=state["count"],
+                     exceeded=exceeded, already_counted=already_counted)
     return ToolResult(json.dumps({
         "rework_count": state["count"], "limit": ctx.settings.rework_limit,
         "limit_exceeded": exceeded, "rejected_from": state["rejected_from"],
+        "already_counted": bool(already_counted),
         "findings": len(rejection["findings"]),
         "bounce_history": state["history"],
     }, ensure_ascii=False, indent=1))
