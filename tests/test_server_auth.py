@@ -12,7 +12,12 @@ touches the network.
 """
 
 import os
+import tempfile
 
+# The server module builds its singletons at import — including an AuditLog that
+# mkdir's DATA_DIR (default /data, not writable on CI). Point it at a temp dir and
+# set the required Jira/LiteLLM env *before* importing sentinel.server.
+os.environ.setdefault("DATA_DIR", tempfile.mkdtemp())
 os.environ.setdefault("JIRA_BASE_URL", "https://jira.example.com")
 os.environ.setdefault("JIRA_PAT", "pat")
 os.environ.setdefault("JIRA_PROJECT_KEY", "SENT")
