@@ -19,6 +19,7 @@ from .config import RoleConfig, Settings
 from .jira import JiraClient, PROP_RETRIES
 from .lease import LeaseError, LeaseManager
 from .llm import LLM
+from .notify import Notifier
 from .audit import AuditLog
 from . import tools as toolsmod
 from .tools import ToolContext, dispatch, tools_for_role
@@ -84,13 +85,15 @@ by the humans (use these rather than guessing):
 
 class AgentRunner:
     def __init__(self, settings: Settings, jira: JiraClient, llm: LLM,
-                 leases: LeaseManager, audit: AuditLog, agent_user: str):
+                 leases: LeaseManager, audit: AuditLog, agent_user: str,
+                 notifier: "Notifier | None" = None):
         self.settings = settings
         self.jira = jira
         self.llm = llm
         self.leases = leases
         self.audit = audit
         self.agent_user = agent_user
+        self.notifier = notifier
 
     async def run(self, role: RoleConfig, ticket: str | None, kickoff: str) -> None:
         """Run one role agent instance. `ticket` is set for ticket-scoped roles."""
@@ -98,7 +101,7 @@ class AgentRunner:
         workspace.mkdir(parents=True, exist_ok=True)
         ctx = ToolContext(jira=self.jira, llm=self.llm, leases=self.leases,
                           settings=self.settings, audit=self.audit, role=role,
-                          ticket=ticket, workspace=workspace)
+                          ticket=ticket, workspace=workspace, notifier=self.notifier)
 
         if ticket:
             try:

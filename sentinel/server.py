@@ -18,6 +18,7 @@ from .audit import AuditLog
 from .config import load_settings
 from .jira import JiraClient
 from .llm import LLM
+from .notify import Notifier
 from .orchestrator import Orchestrator
 
 log = logging.getLogger("sentinel")
@@ -30,7 +31,8 @@ logging.basicConfig(
 jira = JiraClient(settings.jira_base_url, settings.jira_pat)
 llm = LLM(settings.litellm_base_url, settings.litellm_api_key, settings.default_model)
 audit = AuditLog(settings.data_dir / "audit.jsonl")
-orchestrator = Orchestrator(settings, jira, llm, audit)
+notifier = Notifier(settings.alert_webhook_url, settings.jira_base_url)
+orchestrator = Orchestrator(settings, jira, llm, audit, notifier)
 
 
 @asynccontextmanager
@@ -43,6 +45,7 @@ async def lifespan(app: FastAPI):
         loop_task.cancel()
         await jira.close()
         await llm.close()
+        await notifier.close()
 
 
 app = FastAPI(title="Sentinel", version=__version__, lifespan=lifespan)

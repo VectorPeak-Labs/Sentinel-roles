@@ -21,6 +21,7 @@ from .jira import (JiraClient, JiraError, PROP_LEASE, PROP_RETRIES, PROP_REWORK,
                    PROP_WAITING)
 from .lease import LeaseManager
 from .llm import LLM
+from .notify import Notifier
 from .payloads import find_payload, validate_handoff
 
 log = logging.getLogger("sentinel.orchestrator")
@@ -42,11 +43,14 @@ def _parse_ts(value: str | None) -> datetime | None:
 
 
 class Orchestrator:
-    def __init__(self, settings: Settings, jira: JiraClient, llm: LLM, audit: AuditLog):
+    def __init__(self, settings: Settings, jira: JiraClient, llm: LLM, audit: AuditLog,
+                 notifier: Notifier | None = None):
         self.settings = settings
         self.jira = jira
         self.llm = llm
         self.audit = audit
+        # Disabled Notifier when none supplied, so `.notify(...)` is always safe.
+        self.notifier = notifier or Notifier()
         self.agent_user: str = ""
         self.leases: LeaseManager | None = None
         self.runner: AgentRunner | None = None
@@ -80,7 +84,8 @@ class Orchestrator:
                                    self.settings.label("leased"),
                                    self.settings.lease_timeout)
         self.runner = AgentRunner(self.settings, self.jira, self.llm,
-                                  self.leases, self.audit, self.agent_user)
+                                  self.leases, self.audit, self.agent_user,
+                                  self.notifier)
         self._load_pause_state()
         log.info("orchestrator started as Jira user '%s', project %s, %d roles%s",
                  self.agent_user, self.settings.jira_project, len(self.settings.roles),
@@ -123,6 +128,11 @@ class Orchestrator:
         self._persist_pause_state(by)
         log.warning("pipeline PAUSED by %s: %s", by, self.pause_reason or "(no reason given)")
         self.audit.record("pipeline_paused", by=by, reason=self.pause_reason)
+        await self.notifier.notify(
+            "pipeline_paused",
+            f"⏸️ {self.settings.jira_project} pipeline PAUSED by {by}"
+            + (f": {self.pause_reason}" if self.pause_reason else ""),
+            by=by, reason=self.pause_reason)
 
     async def resume(self, by: str = "operator") -> None:
         self.paused = False
@@ -136,6 +146,9 @@ class Orchestrator:
             log.warning("could not clear pause file %s: %s", self._pause_file(), e)
         log.warning("pipeline RESUMED by %s", by)
         self.audit.record("pipeline_resumed", by=by)
+        await self.notifier.notify(
+            "pipeline_resumed",
+            f"▶️ {self.settings.jira_project} pipeline RESUMED by {by}", by=by)
 
     async def stop(self) -> None:
         self._stopped.set()
@@ -379,6 +392,11 @@ class Orchestrator:
             key, f"[sentinel] ORCHESTRATOR ESCALATION\n\n{reason}\n\n"
                  f"Remove the `{self.settings.label('needs_human')}` label to resume the pipeline.")
         self.audit.record("orchestrator_escalation", ticket=key, reason=reason)
+        await self.notifier.notify(
+            "orchestrator_escalation",
+            f"🚨 {self.settings.jira_project} {key} frozen by the orchestrator — needs a human. "
+            f"{reason}",
+            ticket=key, source="orchestrator", reason=reason)
 
     # -- webhook handling ---------------------------------------------------
 

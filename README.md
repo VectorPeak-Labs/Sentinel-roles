@@ -108,8 +108,24 @@ The shell-enabled roles (Implementer 07, Reviewer 08, Deploy 09, QA 10, Release 
 real commands in a persistent workspace. Until you fill in the `commands:` section of
 `config/pipeline.yml` (repo clone, test suite, deploy scripts), those agents will escalate
 with `needs-human` when they need them — by design, they never guess at deploy commands.
-Escalation notifications are Jira comments + the `needs-human` label; wire your own chat
-alert on that label (e.g. Jira automation) if you want pings.
+
+### Alerting (getting pinged when the pipeline needs you)
+
+Every escalation writes a Jira comment and the `needs-human` label. To be actively
+notified instead of watching the board, set `SENTINEL_ALERT_WEBHOOK_URL` to a chat webhook
+(a Slack incoming-webhook URL works as-is). Sentinel then POSTs a JSON message on every
+event that needs a human — agent and orchestrator escalations, plus pipeline pause/resume:
+
+```json
+{"text": "🚨 SENT SENT-42 escalated by 09-deployment — needs a human. deploy_production command not configured → fill in config/pipeline.yml",
+ "event": "agent_escalation", "ticket": "SENT-42",
+ "url": "https://jira.example.com/browse/SENT-42", "source": "09-deployment"}
+```
+
+Slack renders `text`; generic consumers get the structured `event`/`ticket`/`url` fields.
+Alerting is **disabled by default** and **best-effort** — a slow or failing endpoint is
+logged and never blocks or crashes the pipeline. Leave the URL unset to keep Jira comments
+as the only channel (or wire your own automation on the `needs-human` label instead).
 
 ## Endpoints
 
