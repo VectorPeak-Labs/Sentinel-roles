@@ -80,6 +80,19 @@ def test_invalid_handoff_posts_nothing(ctx):
     assert ctx.jira.comments.get("SENT-1", []) == []
 
 
+def test_missing_workflow_edge_posts_nothing(ctx):
+    # workflow misconfiguration: 'Rework' status exists but no edge from Tech Review
+    ctx.jira.allowed_targets["SENT-1"] = ["Tech Review Accepted"]
+    result = asyncio.run(dispatch(ctx, "reject_to_rework", {
+        "key": "SENT-1", "summary": "rejected",
+        "rejection_yaml": rejection_yaml(), "handoff_yaml": handoff_yaml()}))
+    assert result.content.startswith("ERROR")
+    assert "no transition" in result.content
+    assert "Tech Review Accepted" in result.content   # lists the available targets
+    assert ctx.jira.comments.get("SENT-1", []) == []  # no orphaned payload comment
+    assert ctx.jira.transitions == []
+
+
 def test_invalid_rejection_posts_nothing(ctx):
     broken = yaml.safe_load(rejection_yaml())
     broken["rework"]["findings"][0].pop("criterion_ref")

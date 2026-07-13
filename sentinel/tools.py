@@ -336,6 +336,17 @@ async def _check_transition(ctx: ToolContext, key: str, to_status: str,
     if payload["from_status"].lower() != current.lower():
         return ToolResult(f"ERROR: ticket is in '{current}' but handoff.from_status says "
                           f"'{payload['from_status']}' — re-read the ticket, someone moved it")
+
+    # Verify the workflow actually has an edge to the target BEFORE posting anything:
+    # otherwise the handoff comment lands on a ticket that then fails to move,
+    # leaving an orphaned payload (once per retry).
+    transitions = await ctx.jira.list_transitions(key)
+    targets = [(t.get("to") or {}).get("name", "") for t in transitions]
+    if to_status.lower() not in (t.lower() for t in targets):
+        return ToolResult(f"ERROR: the Jira workflow has no transition from '{current}' "
+                          f"to '{to_status}' for {key}. Available targets: {targets}. "
+                          f"If the pipeline requires this transition, escalate — the "
+                          f"workflow configuration is missing an edge.")
     return payload, current
 
 

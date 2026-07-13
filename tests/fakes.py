@@ -11,6 +11,7 @@ class FakeJira:
         self.comments: dict[str, list[str]] = {}
         self.issues: dict[str, dict] = {}
         self.transitions: list[tuple[str, str]] = []
+        self.allowed_targets: dict[str, list[str]] = {}
         self.get_issue_calls = 0
 
     async def myself(self):
@@ -48,6 +49,18 @@ class FakeJira:
         self.get_issue_calls += 1
         return self.issues.get(key, {"key": key, "fields": {
             "status": {"name": "In Progress"}, "labels": []}})
+
+    # Per-ticket allowed transition targets; unset keys fall back to the full
+    # pipeline (permissive default keeps most tests focused on other behavior).
+    PIPELINE_STATUSES = [
+        "New", "On Hold", "Business Requirements", "Technical Requirements",
+        "Technical Refinement", "To Do", "In Progress", "Tech Review",
+        "Tech Review Accepted", "Internal Review", "Internal Review Accepted",
+        "Client Review", "Client Review Accepted", "Rework", "Done"]
+
+    async def list_transitions(self, key):
+        targets = self.allowed_targets.get(key, self.PIPELINE_STATUSES)
+        return [{"id": str(i + 1), "to": {"name": t}} for i, t in enumerate(targets)]
 
     async def transition_to(self, key, target_status):
         self.transitions.append((key, target_status))
