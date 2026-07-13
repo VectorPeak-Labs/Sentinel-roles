@@ -64,6 +64,7 @@ class Settings:
     lease_timeout: int
     heartbeat_interval: int
     max_agent_turns: int
+    jira_max_retries: int
     log_level: str
 
     rework_limit: int = 2
@@ -114,6 +115,7 @@ def load_settings(config_path: str | os.PathLike | None = None) -> Settings:
         lease_timeout=int(os.environ.get("SENTINEL_LEASE_TIMEOUT", "1800")),
         heartbeat_interval=int(os.environ.get("SENTINEL_HEARTBEAT_INTERVAL", "600")),
         max_agent_turns=int(os.environ.get("SENTINEL_MAX_AGENT_TURNS", "80")),
+        jira_max_retries=int(os.environ.get("SENTINEL_JIRA_MAX_RETRIES", "3")),
         log_level=os.environ.get("SENTINEL_LOG_LEVEL", "INFO"),
     )
 

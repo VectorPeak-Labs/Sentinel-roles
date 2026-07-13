@@ -28,7 +28,8 @@ logging.basicConfig(
     level=getattr(logging, settings.log_level.upper(), logging.INFO),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
-jira = JiraClient(settings.jira_base_url, settings.jira_pat)
+jira = JiraClient(settings.jira_base_url, settings.jira_pat,
+                  max_retries=settings.jira_max_retries)
 llm = LLM(settings.litellm_base_url, settings.litellm_api_key, settings.default_model)
 audit = AuditLog(settings.data_dir / "audit.jsonl")
 notifier = Notifier(settings.alert_webhook_url, settings.jira_base_url)
