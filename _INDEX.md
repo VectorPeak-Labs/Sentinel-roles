@@ -110,8 +110,10 @@ Jira webhooks ─┐                          ┌─> AgentRunner._loop (LLM too
 
 1. **`server.py`** loads settings at import, builds `JiraClient`, `LLM`, `AuditLog`,
    `Orchestrator`; the FastAPI lifespan starts `orchestrator.run_forever()` as a background
-   task. Endpoints: `GET /health` (status: starting/ok/degraded — degraded after ≥2
-   consecutive sweep failures), `POST /webhook/jira?token=…`, `POST /sweep?token=…`.
+   task. Endpoints: `GET /health` (status: starting/paused/ok/degraded — degraded after ≥2
+   consecutive sweep failures, paused while the operator kill-switch is engaged),
+   `POST /webhook/jira?token=…`, `POST /sweep?token=…`, `POST /pause?token=…&reason=…`,
+   `POST /resume?token=…` (all mutating endpoints share the webhook token).
    Webhook handling is fire-and-forget with strong task references (asyncio GC pitfall).
 2. **`orchestrator.py`** — startup retries with backoff (Jira may boot alongside). Every
    `sweep_interval` (900 s) it JQL-searches all agent-owned statuses (ORDER BY updated ASC,
@@ -124,6 +126,10 @@ Jira webhooks ─┐                          ┌─> AgentRunner._loop (LLM too
    on a human; wakes on newer `updated` or `wake_at`) → **WIP limit** per status. Queue
    roles get one singleton instance with a ticket listing; conditions:
    `capacity_in_progress`, `release_window`, `min_interval_seconds` (+ force label).
+   A **global pause** (`pause()`/`resume()`, driven by `/pause`+`/resume`) is a hard gate at
+   the top of `_evaluate_ticket`/`_evaluate_queues`: when engaged, no agent is dispatched and
+   no repair side effects run; in-flight runs drain. The flag is persisted to
+   `DATA_DIR/pause.json` and reloaded in `start()` so a restart mid-incident stays frozen.
    `_on_status_change` (ORC-5): an **agent** transition without a matching valid
    `agent_handoff` in the last 10 comments ⇒ label `handoff-invalid` + escalate (never
    reverted); a **human** transition is logged and honored (universal rule 6); a clean
@@ -212,6 +218,12 @@ macros, and bare documents starting with a known top-level key.
 `needs-human` (frozen; **remove to resume**), `handoff-invalid` (invalid agent transition),
 `agent-leased` (managed by LeaseManager only), `deploy-now` (bypass deploy batch cadence),
 `release-now` (open a production release window). All renameable in `pipeline.yml`.
+
+**Global pause** — the whole-pipeline counterpart to per-ticket `needs-human`: `POST /pause`
+freezes all dispatch, `POST /resume` lifts it. This is the one piece of runtime state that
+lives **outside Jira** — a `DATA_DIR/pause.json` file local to the container (an operator
+kill-switch must not depend on Jira being reachable). Reloaded on startup so a restart stays
+frozen.
 
 **Lease protocol** (`lease.py`): claim = property + label + assignee + comment; fails if an
 unexpired lease exists (staleness = no heartbeat within `SENTINEL_LEASE_TIMEOUT`, 1800 s);

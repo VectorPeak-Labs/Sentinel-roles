@@ -62,6 +62,8 @@ def _spawn_background(coro) -> None:
 async def health() -> dict:
     if not orchestrator.agent_user:
         status = "starting"
+    elif orchestrator.paused:
+        status = "paused"     # operator freeze — no new dispatch until /resume
     elif orchestrator.consecutive_sweep_failures >= 2:
         status = "degraded"   # Jira unreachable / PAT expired — dispatching is halted
     else:
@@ -70,6 +72,9 @@ async def health() -> dict:
         "status": status,
         "version": __version__,
         "agent_user": orchestrator.agent_user,
+        "paused": orchestrator.paused,
+        "paused_at": orchestrator.paused_at,
+        "pause_reason": orchestrator.pause_reason,
         "last_sweep_at": orchestrator.last_sweep_at,
         "last_sweep_error": orchestrator.last_sweep_error,
         "consecutive_sweep_failures": orchestrator.consecutive_sweep_failures,
@@ -102,3 +107,26 @@ async def trigger_sweep(token: str = "") -> dict:
         raise HTTPException(status_code=403, detail="bad token")
     _spawn_background(orchestrator.sweep())
     return {"sweeping": True}
+
+
+@app.post("/pause")
+async def pause(token: str = "", reason: str = "") -> dict:
+    """Freeze the pipeline: stop dispatching new agents (in-flight runs drain).
+
+    The freeze is persisted, so a container restart stays paused until /resume.
+    Same auth as the webhook.
+    """
+    if settings.webhook_secret and token != settings.webhook_secret:
+        raise HTTPException(status_code=403, detail="bad token")
+    await orchestrator.pause(reason=reason, by="api")
+    return {"paused": True, "reason": orchestrator.pause_reason,
+            "paused_at": orchestrator.paused_at}
+
+
+@app.post("/resume")
+async def resume(token: str = "") -> dict:
+    """Lift a pause and resume dispatching on the next sweep/webhook."""
+    if settings.webhook_secret and token != settings.webhook_secret:
+        raise HTTPException(status_code=403, detail="bad token")
+    await orchestrator.resume(by="api")
+    return {"paused": False}

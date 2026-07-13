@@ -253,3 +253,58 @@ def test_human_transition_honored_without_validation(settings, tmp_path):
     run(orch._on_status_change("SENT-1", "alice",
                                {"fromString": "New", "toString": "Done"}))
     assert jira.labels.get("SENT-1", set()) == set()
+
+
+# -- global pause (operational kill-switch) --------------------------------
+
+def test_pause_suppresses_ticket_dispatch(settings, tmp_path):
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    orch.settings.data_dir = tmp_path
+    run(orch.pause(reason="incident", by="alice"))
+    run(orch._evaluate_ticket(issue("SENT-1", "Business Requirements")))
+    assert orch.runner.runs == []            # nothing dispatched while paused
+    # a paused evaluation takes no side effects (no reclaim/escalate mutations)
+    assert jira.labels.get("SENT-1", set()) == set()
+
+
+def test_pause_suppresses_queue_dispatch(settings, tmp_path):
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    orch.settings.data_dir = tmp_path
+    run(orch.pause(by="alice"))
+    queue = [issue("SENT-30", "Client Review Accepted", labels=["release-now"])]
+    run(orch._evaluate_queues(queue))
+    assert orch.runner.runs == []
+
+
+def test_resume_restores_dispatch(settings, tmp_path):
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    orch.settings.data_dir = tmp_path
+    run(orch.pause(by="alice"))
+    run(orch._evaluate_ticket(issue("SENT-1", "Business Requirements")))
+    assert orch.runner.runs == []
+    run(orch.resume(by="alice"))
+    assert orch.paused is False
+    run(orch._evaluate_ticket(issue("SENT-1", "Business Requirements")))
+    assert orch.runner.runs == [("03-business-analyst", "SENT-1")]
+
+
+def test_pause_state_survives_restart(settings, tmp_path):
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    orch.settings.data_dir = tmp_path
+    run(orch.pause(reason="freeze for deploy", by="alice"))
+    assert (tmp_path / "pause.json").exists()
+
+    # A fresh orchestrator (simulating a container restart) must reload the freeze.
+    revived = make_orchestrator(settings, jira, tmp_path)
+    revived.settings.data_dir = tmp_path
+    revived._load_pause_state()
+    assert revived.paused is True
+    assert revived.pause_reason == "freeze for deploy"
+
+    # ...and resume clears the persisted state so the next restart starts clean.
+    run(revived.resume(by="alice"))
+    assert not (tmp_path / "pause.json").exists()
