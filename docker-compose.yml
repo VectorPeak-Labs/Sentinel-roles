@@ -1,0 +1,32 @@
+services:
+  sentinel:
+    build: .
+    container_name: sentinel
+    env_file: .env
+    ports:
+      - "8080:8080"   # /webhook/jira (point a Jira webhook here), /health, /sweep
+    volumes:
+      # Role documents and pipeline config are mounted so they can be edited
+      # without rebuilding the image (restart to apply).
+      - ./docs:/app/docs:ro
+      - ./config:/app/config:ro
+      - sentinel-data:/data   # audit log + agent workspaces
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # One-shot pre-flight check:  docker compose run --rm doctor
+  doctor:
+    build: .
+    env_file: .env
+    command: doctor
+    volumes:
+      - ./docs:/app/docs:ro
+      - ./config:/app/config:ro
+    profiles: ["tools"]
+
+volumes:
+  sentinel-data:
