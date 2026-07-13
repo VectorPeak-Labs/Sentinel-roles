@@ -44,9 +44,9 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   ├── server.py              # FastAPI app: /health, /webhook/jira, /sweep; starts the orchestrator loop
 │   ├── orchestrator.py        # role 01: sweep + webhook dispatch, leases, WIP, loop-breaker, handoff audit
 │   ├── agent.py               # AgentRunner: builds system prompts, runs the LLM tool loop, heartbeats
-│   ├── tools.py               # all 17 agent tools + their enforcement logic (the contract layer)
+│   ├── tools.py               # all 19 agent tools + their enforcement logic (the contract layer)
 │   ├── payloads.py            # agent_handoff / rework YAML schema validators + comment extraction
-│   ├── jira.py                # async Jira Server/DC client (httpx); issue-property state keys
+│   ├── jira.py                # async Jira Server/DC client (httpx); issue-property state keys; attachment up/download
 │   ├── lease.py               # LeaseManager: claim / heartbeat / release / reclaim protocol
 │   ├── llm.py                 # thin AsyncOpenAI wrapper pointed at LiteLLM
 │   ├── config.py              # env settings + config/pipeline.yml loader (RoleConfig, Settings)
@@ -68,6 +68,7 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   ├── test_rework_router.py  # increment_rework idempotency + loop-breaker signalling
 │   └── test_tools_reject.py   # reject_to_rework pre-flight ordering (no orphaned payloads)
 │   └── test_run_command.py    # workspace containment (path-aware, not string-prefix)
+│   └── test_attachments.py    # evidence channel: attach_file/get_attachment + containment
 ├── conftest.py                # inserts repo root into sys.path (bare `pytest` support)
 ├── Dockerfile                 # python:3.12-slim + git/curl (for shell roles); entrypoint serve|doctor
 ├── docker-compose.yml         # sentinel service (port 8080, docs+config mounted ro, /data volume) + doctor profile
@@ -142,9 +143,10 @@ Jira webhooks ─┐                          ┌─> AgentRunner._loop (LLM too
 
 ## 5. Agent tools (tools.py)
 
-Base tools (all roles): `get_ticket` (fields + sentinel state + last 30 comments),
-`search_tickets` (JQL, auto-scoped to project), `add_comment`, `set_labels`
-(cannot touch the `agent-leased` label), `create_ticket`, `link_tickets`, `assign_ticket`,
+Base tools (all roles): `get_ticket` (fields + attachments + sentinel state + last 30
+comments), `search_tickets` (JQL, auto-scoped to project), `add_comment`, `set_labels`
+(cannot touch the `agent-leased` label), `get_attachment`, `attach_file` (the evidence
+channel), `create_ticket`, `link_tickets`, `assign_ticket`,
 `set_deployed_build`, `transition_with_handoff`, `reject_to_rework`, `escalate`, `finish_run`.
 
 Conditional: `claim_ticket`/`release_ticket` (queue roles), `increment_rework` (role 13),
@@ -169,6 +171,13 @@ Key enforcement details:
 - **`run_command`** runs in a persistent per-role workspace (`DATA_DIR/workspace/<role>`),
   with a **path-aware containment check** (`Path.is_relative_to`, not string prefix —
   "07" vs "07-evil"), timeout capped at 1800 s, output truncated at 30 000 chars.
+- **`attach_file` / `get_attachment`** are the evidence channel (universal rule 5:
+  screenshots, scan reports, evidence bundles). Upload takes a workspace file (same
+  path-aware containment as `run_command`) or inline text + filename; download saves
+  into `workspace/attachments/` with the filename sanitized (`Path(...).name` — a
+  hostile attachment name cannot escape), returns text MIME types inline, and the
+  Jira client refuses attachment-content URLs on a different host than the configured
+  Jira (the PAT rides on every client request). Both directions cap at 20 MB.
 - **`run_estimators`** spawns ≤5 blind, independent LLM contexts (temperature 1.0) for
   planning poker; convergence is applied by the refinement agent, ratification by a human.
 
