@@ -13,12 +13,14 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.responses import PlainTextResponse
 
 from . import __version__
 from .audit import AuditLog
 from .config import load_settings
 from .jira import JiraClient
 from .llm import LLM
+from .metrics import Metrics, render as render_metrics
 from .notify import Notifier
 from .orchestrator import Orchestrator
 
@@ -36,7 +38,8 @@ audit = AuditLog(settings.data_dir / "audit.jsonl",
                  max_bytes=settings.audit_max_bytes,
                  backup_count=settings.audit_backup_count)
 notifier = Notifier(settings.alert_webhook_url, settings.jira_base_url)
-orchestrator = Orchestrator(settings, jira, llm, audit, notifier)
+metrics = Metrics()
+orchestrator = Orchestrator(settings, jira, llm, audit, notifier, metrics)
 
 
 @asynccontextmanager
@@ -129,6 +132,24 @@ async def health() -> dict:
             for (role_id, ticket) in orchestrator.running
         ],
     }
+
+
+@app.get("/metrics", response_class=PlainTextResponse)
+async def prometheus_metrics() -> str:
+    """Prometheus exposition: monotonic counters plus live gauges sampled from
+    orchestrator state. Unauthenticated, like /health — scrape it on a trusted
+    network (or terminate/authenticate at the reverse proxy)."""
+    gauges = {
+        "up": ("1 when the process is serving.", 1),
+        "paused": ("1 when the pipeline is paused (no dispatch).", int(orchestrator.paused)),
+        "running_agents": ("Role agents currently running.", len(orchestrator.running)),
+        "consecutive_sweep_failures":
+            ("Consecutive failed sweeps (>=2 => degraded).", orchestrator.consecutive_sweep_failures),
+        "sweeps_total": ("Board sweeps completed since start.", orchestrator.sweep_count),
+        "pending_webhook_evaluations":
+            ("Tickets queued for a debounced webhook evaluation.", len(orchestrator._pending_keys)),
+    }
+    return render_metrics(metrics.snapshot(), gauges)
 
 
 @app.post("/webhook/jira")

@@ -21,6 +21,7 @@ from .jira import (JiraClient, JiraError, PROP_LEASE, PROP_RETRIES, PROP_REWORK,
                    PROP_WAITING)
 from .lease import LeaseManager
 from .llm import LLM
+from .metrics import Metrics
 from .notify import Notifier
 from .payloads import find_payload, validate_handoff
 
@@ -44,13 +45,14 @@ def _parse_ts(value: str | None) -> datetime | None:
 
 class Orchestrator:
     def __init__(self, settings: Settings, jira: JiraClient, llm: LLM, audit: AuditLog,
-                 notifier: Notifier | None = None):
+                 notifier: Notifier | None = None, metrics: Metrics | None = None):
         self.settings = settings
         self.jira = jira
         self.llm = llm
         self.audit = audit
         # Disabled Notifier when none supplied, so `.notify(...)` is always safe.
         self.notifier = notifier or Notifier()
+        self.metrics = metrics or Metrics()
         self.agent_user: str = ""
         self.leases: LeaseManager | None = None
         self.runner: AgentRunner | None = None
@@ -85,7 +87,7 @@ class Orchestrator:
                                    self.settings.lease_timeout)
         self.runner = AgentRunner(self.settings, self.jira, self.llm,
                                   self.leases, self.audit, self.agent_user,
-                                  self.notifier)
+                                  self.notifier, self.metrics)
         self._load_pause_state()
         log.info("orchestrator started as Jira user '%s', project %s, %d roles%s",
                  self.agent_user, self.settings.jira_project, len(self.settings.roles),
@@ -195,11 +197,13 @@ class Orchestrator:
             # 01 failure path: Jira unavailable -> halt dispatching, resume with full sweep
             self.consecutive_sweep_failures += 1
             self.last_sweep_error = str(e)
+            self.metrics.inc("sweep_failures_total")
             log.error("sweep failed (Jira unavailable?): %s", e)
             self.audit.record("sweep_failed", error=str(e))
         except Exception as e:
             self.consecutive_sweep_failures += 1
             self.last_sweep_error = f"{type(e).__name__}: {e}"
+            self.metrics.inc("sweep_failures_total")
             log.exception("sweep crashed")
             self.audit.record("sweep_failed", error=self.last_sweep_error)
 
@@ -266,6 +270,7 @@ class Orchestrator:
             retries = await self.jira.get_property(key, PROP_RETRIES) or {"count": 0}
             retries["count"] = int(retries.get("count", 0)) + 1
             await self.jira.set_property(key, PROP_RETRIES, retries)
+            self.metrics.inc("lease_reclaims_total")
             self.audit.record("lease_reclaimed", ticket=key, role=lease.get("role"),
                               retries=retries["count"])
             # fall through: the generic retry check below decides retry vs escalate
@@ -383,6 +388,7 @@ class Orchestrator:
         task = asyncio.create_task(self.runner.run(role, ticket, kickoff),
                                    name=f"{role.role_id}:{ticket or 'queue'}")
         self.running[(role.role_id, ticket)] = (task, status)
+        self.metrics.inc("dispatches_total")
         self.audit.record("dispatch_scheduled", role=role.role_id, ticket=ticket, status=status)
         log.info("dispatched %s on %s", role.role_id, ticket or "queue")
 
@@ -391,6 +397,7 @@ class Orchestrator:
         await self.jira.add_comment(
             key, f"[sentinel] ORCHESTRATOR ESCALATION\n\n{reason}\n\n"
                  f"Remove the `{self.settings.label('needs_human')}` label to resume the pipeline.")
+        self.metrics.inc("escalations_total")
         self.audit.record("orchestrator_escalation", ticket=key, reason=reason)
         await self.notifier.notify(
             "orchestrator_escalation",
@@ -472,6 +479,7 @@ class Orchestrator:
                 payload = candidate
                 break
         if payload is None or not validate_handoff(payload).ok:
+            self.metrics.inc("handoff_invalid_total")
             await self.jira.update_labels(key, add=[self.settings.label("handoff_invalid")])
             await self._escalate(
                 key, f"Agent transition '{from_status}' -> '{to_status}' has no valid "
@@ -479,6 +487,7 @@ class Orchestrator:
                      f"was NOT reverted; a human must review it.")
         else:
             # Clean handoff observed — reset the crash-retry counter for the new stage.
+            self.metrics.inc("transitions_validated_total")
             await self.jira.delete_property(key, PROP_RETRIES)
             self.audit.record("agent_transition_validated", ticket=key,
                               from_status=from_status, to_status=to_status,

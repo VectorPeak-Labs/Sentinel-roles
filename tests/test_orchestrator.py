@@ -315,6 +315,19 @@ def test_escalation_fires_notification(settings, tmp_path):
     assert orch.notifier.events == [("orchestrator_escalation", "SENT-1")]
 
 
+def test_metrics_count_dispatch_and_escalation(settings, tmp_path):
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    # a clean dispatch
+    run(orch._evaluate_ticket(issue("SENT-1", "Business Requirements")))
+    # a forced escalation on another ticket
+    jira.properties[("SENT-2", PROP_RETRIES)] = {"count": 2}
+    run(orch._evaluate_ticket(issue("SENT-2", "Business Requirements")))
+    snap = orch.metrics.snapshot()
+    assert snap["dispatches_total"] == 1
+    assert snap["escalations_total"] == 1
+
+
 def test_pause_and_resume_fire_notifications(settings, tmp_path):
     jira = FakeJira()
     orch = make_orchestrator(settings, jira, tmp_path)
