@@ -46,7 +46,7 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   ├── agent.py               # AgentRunner: builds system prompts, runs the LLM tool loop, heartbeats
 │   ├── tools.py               # all 19 agent tools + their enforcement logic (the contract layer)
 │   ├── payloads.py            # agent_handoff / rework YAML schema validators + comment extraction
-│   ├── jira.py                # async Jira Server/DC client (httpx); issue-property state keys; attachment up/download
+│   ├── jira.py                # async Jira Server/DC client (httpx); issue-property state keys; attachment up/download; retry/backoff on transient errors
 │   ├── lease.py               # LeaseManager: claim / heartbeat / release / reclaim protocol
 │   ├── llm.py                 # thin AsyncOpenAI wrapper pointed at LiteLLM
 │   ├── notify.py              # outbound alert channel: POST escalations/pause to a webhook (Slack-compatible)
@@ -71,6 +71,7 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   └── test_run_command.py    # workspace containment (path-aware, not string-prefix)
 │   └── test_attachments.py    # evidence channel: attach_file/get_attachment + containment
 │   └── test_notify.py         # outbound alert channel: payload shape, disabled default, error-swallowing
+│   └── test_jira_retry.py     # transient-failure retry: 429/5xx, transport errors, idempotency, give-up
 ├── conftest.py                # inserts repo root into sys.path (bare `pytest` support)
 ├── Dockerfile                 # python:3.12-slim + git/curl (for shell roles); entrypoint serve|doctor
 ├── docker-compose.yml         # sentinel service (port 8080, docs+config mounted ro, /data volume) + doctor profile
@@ -240,7 +241,8 @@ Optional: `SENTINEL_DEFAULT_MODEL` (default `gpt-4o`), `SENTINEL_REVIEWER_MODEL`
 `WEBHOOK_SECRET`, `SENTINEL_ALERT_WEBHOOK_URL` (outbound alert webhook; empty = disabled),
 `DATA_DIR` (/data), `DOCS_DIR` (docs), `SENTINEL_CONFIG`
 (config/pipeline.yml), `SENTINEL_SWEEP_INTERVAL` (900), `SENTINEL_LEASE_TIMEOUT` (1800),
-`SENTINEL_HEARTBEAT_INTERVAL` (600), `SENTINEL_MAX_AGENT_TURNS` (80), `SENTINEL_LOG_LEVEL`.
+`SENTINEL_HEARTBEAT_INTERVAL` (600), `SENTINEL_MAX_AGENT_TURNS` (80),
+`SENTINEL_JIRA_MAX_RETRIES` (3), `SENTINEL_LOG_LEVEL`.
 
 **`config/pipeline.yml`** supports `${VAR}` / `${VAR:default}` expansion (recursive, done
 in `config._expand_env`). Defines: `rework_limit` (2), `split_threshold_points` (8),
@@ -298,6 +300,11 @@ is tested end to end without a model.
   reasoning-quality layer (8 disciplines + a 5-question self-test) loaded into every agent.
 - Jira **Server/DC v2 API only** (PAT bearer, username-based assignee, `{code}` comment
   macros); search uses POST /search with 50-per-page pagination.
+- **Transient Jira failures are absorbed, not surfaced**: `JiraClient._request` retries
+  429/502/503/504 (any method) and network errors (idempotent methods only — a mutating
+  POST is never blindly retried) with capped exponential backoff + jitter, honoring
+  `Retry-After`. A single 429/503 blip therefore does not fail an agent action or count
+  toward the `degraded` sweep-failure threshold. Tunable via `SENTINEL_JIRA_MAX_RETRIES`.
 
 ## 10. Current state & known gaps
 
