@@ -60,11 +60,19 @@ def _spawn_background(coro) -> None:
 
 @app.get("/health")
 async def health() -> dict:
+    if not orchestrator.agent_user:
+        status = "starting"
+    elif orchestrator.consecutive_sweep_failures >= 2:
+        status = "degraded"   # Jira unreachable / PAT expired — dispatching is halted
+    else:
+        status = "ok"
     return {
-        "status": "ok" if orchestrator.agent_user else "starting",
+        "status": status,
         "version": __version__,
         "agent_user": orchestrator.agent_user,
         "last_sweep_at": orchestrator.last_sweep_at,
+        "last_sweep_error": orchestrator.last_sweep_error,
+        "consecutive_sweep_failures": orchestrator.consecutive_sweep_failures,
         "sweep_count": orchestrator.sweep_count,
         "pending_webhook_evaluations": len(orchestrator._pending_keys),
         "running_agents": [

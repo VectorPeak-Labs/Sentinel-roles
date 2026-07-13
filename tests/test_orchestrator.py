@@ -223,6 +223,30 @@ def test_webhook_burst_coalesces_into_one_evaluation(settings, tmp_path):
     # five events, one dispatch (later events see the ticket already running/leased)
     assert orch.runner.runs == [("03-business-analyst", "SENT-1")]
 
+def test_sweep_failures_tracked_and_reset(settings, tmp_path):
+    from sentinel.jira import JiraError
+
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+
+    async def broken_search(jql, max_results=100, fields=None):
+        raise JiraError(401, "PAT expired")
+
+    async def main():
+        jira.search = broken_search
+        await orch._sweep_safely()
+        await orch._sweep_safely()
+        assert orch.consecutive_sweep_failures == 2   # /health flips to 'degraded' here
+        assert "PAT expired" in orch.last_sweep_error
+        jira.search = FakeJira().search               # Jira back up
+        await orch._sweep_safely()
+        assert orch.consecutive_sweep_failures == 0
+        assert orch.last_sweep_error is None
+        assert orch.sweep_count == 1
+
+    asyncio.run(main())
+
+
 def test_human_transition_honored_without_validation(settings, tmp_path):
     jira = FakeJira()
     orch = make_orchestrator(settings, jira, tmp_path)

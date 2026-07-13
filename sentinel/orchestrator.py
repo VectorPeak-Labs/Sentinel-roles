@@ -62,6 +62,8 @@ class Orchestrator:
         # /health diagnostics
         self.last_sweep_at: str | None = None
         self.sweep_count = 0
+        self.consecutive_sweep_failures = 0
+        self.last_sweep_error: str | None = None
 
     async def start(self) -> None:
         me = await self.jira.myself()
@@ -102,19 +104,31 @@ class Orchestrator:
                 except asyncio.TimeoutError:
                     delay = min(delay * 2, 300)
         while not self._stopped.is_set():
-            try:
-                await self.sweep()
-            except JiraError as e:
-                # 01 failure path: Jira unavailable -> halt dispatching, resume with full sweep
-                log.error("sweep failed (Jira unavailable?): %s", e)
-                self.audit.record("sweep_failed", error=str(e))
-            except Exception:
-                log.exception("sweep crashed")
+            await self._sweep_safely()
             try:
                 await asyncio.wait_for(self._stopped.wait(),
                                        timeout=self.settings.sweep_interval)
             except asyncio.TimeoutError:
                 pass
+
+    async def _sweep_safely(self) -> None:
+        """Run one sweep, tracking consecutive failures for /health (an expired
+        PAT or a down Jira must surface as 'degraded', not silent log spam)."""
+        try:
+            await self.sweep()
+            self.consecutive_sweep_failures = 0
+            self.last_sweep_error = None
+        except JiraError as e:
+            # 01 failure path: Jira unavailable -> halt dispatching, resume with full sweep
+            self.consecutive_sweep_failures += 1
+            self.last_sweep_error = str(e)
+            log.error("sweep failed (Jira unavailable?): %s", e)
+            self.audit.record("sweep_failed", error=str(e))
+        except Exception as e:
+            self.consecutive_sweep_failures += 1
+            self.last_sweep_error = f"{type(e).__name__}: {e}"
+            log.exception("sweep crashed")
+            self.audit.record("sweep_failed", error=self.last_sweep_error)
 
     # -- sweep -------------------------------------------------------------
 
