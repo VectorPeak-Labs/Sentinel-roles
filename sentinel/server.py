@@ -8,10 +8,11 @@ react in seconds instead of minutes).
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 
 from . import __version__
 from .audit import AuditLog
@@ -52,6 +53,43 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Sentinel", version=__version__, lifespan=lifespan)
+
+if not settings.webhook_secret:
+    log.warning("WEBHOOK_SECRET is not set — /webhook/jira, /sweep, /pause and /resume "
+                "are UNAUTHENTICATED. Anyone who can reach this port can freeze the "
+                "pipeline. Set WEBHOOK_SECRET in production.")
+
+
+def _authorized(secret: str, token: str, x_sentinel_token: str | None,
+                authorization: str | None) -> bool:
+    """Constant-time check of a presented secret against the configured one.
+
+    The secret may arrive as the `X-Sentinel-Token` header, an
+    `Authorization: Bearer <token>` header (both keep it out of URLs and access
+    logs), or the `token` query param (Jira webhooks can only put it in the URL).
+    An empty configured secret means the endpoints are open (documented mode).
+    """
+    if not secret:
+        return True
+    presented = ""
+    if x_sentinel_token:
+        presented = x_sentinel_token
+    elif authorization and authorization[:7].lower() == "bearer ":
+        presented = authorization[7:].strip()
+    elif token:
+        presented = token
+    return bool(presented) and hmac.compare_digest(presented, secret)
+
+
+async def require_auth(
+    token: str = "",
+    x_sentinel_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> None:
+    """FastAPI dependency guarding the mutating endpoints (constant-time)."""
+    if not _authorized(settings.webhook_secret, token, x_sentinel_token, authorization):
+        raise HTTPException(status_code=403, detail="bad token")
+
 
 # Strong references to fire-and-forget tasks: asyncio only keeps weak refs to
 # running tasks, so an unreferenced webhook handler could be GC'd mid-flight.
@@ -94,9 +132,7 @@ async def health() -> dict:
 
 
 @app.post("/webhook/jira")
-async def jira_webhook(request: Request, token: str = "") -> dict:
-    if settings.webhook_secret and token != settings.webhook_secret:
-        raise HTTPException(status_code=403, detail="bad token")
+async def jira_webhook(request: Request, _: None = Depends(require_auth)) -> dict:
     try:
         event = await request.json()
     except Exception:
@@ -107,32 +143,26 @@ async def jira_webhook(request: Request, token: str = "") -> dict:
 
 
 @app.post("/sweep")
-async def trigger_sweep(token: str = "") -> dict:
+async def trigger_sweep(_: None = Depends(require_auth)) -> dict:
     """Manually trigger a board sweep (same auth as the webhook)."""
-    if settings.webhook_secret and token != settings.webhook_secret:
-        raise HTTPException(status_code=403, detail="bad token")
     _spawn_background(orchestrator.sweep())
     return {"sweeping": True}
 
 
 @app.post("/pause")
-async def pause(token: str = "", reason: str = "") -> dict:
+async def pause(reason: str = "", _: None = Depends(require_auth)) -> dict:
     """Freeze the pipeline: stop dispatching new agents (in-flight runs drain).
 
     The freeze is persisted, so a container restart stays paused until /resume.
     Same auth as the webhook.
     """
-    if settings.webhook_secret and token != settings.webhook_secret:
-        raise HTTPException(status_code=403, detail="bad token")
     await orchestrator.pause(reason=reason, by="api")
     return {"paused": True, "reason": orchestrator.pause_reason,
             "paused_at": orchestrator.paused_at}
 
 
 @app.post("/resume")
-async def resume(token: str = "") -> dict:
+async def resume(_: None = Depends(require_auth)) -> dict:
     """Lift a pause and resume dispatching on the next sweep/webhook."""
-    if settings.webhook_secret and token != settings.webhook_secret:
-        raise HTTPException(status_code=403, detail="bad token")
     await orchestrator.resume(by="api")
     return {"paused": False}

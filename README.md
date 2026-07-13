@@ -137,11 +137,18 @@ as the only channel (or wire your own automation on the `needs-human` label inst
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /health` | liveness + pause state + currently running agents |
-| `POST /webhook/jira?token=…` | Jira webhook receiver |
-| `POST /sweep?token=…` | force an immediate board sweep |
-| `POST /pause?token=…&reason=…` | freeze all dispatch (in-flight runs drain); survives restart |
-| `POST /resume?token=…` | lift the pause and resume dispatching |
+| `GET /health` | liveness + pause state + currently running agents (no auth) |
+| `POST /webhook/jira` | Jira webhook receiver |
+| `POST /sweep` | force an immediate board sweep |
+| `POST /pause?reason=…` | freeze all dispatch (in-flight runs drain); survives restart |
+| `POST /resume` | lift the pause and resume dispatching |
+
+The four `POST` endpoints can freeze or nudge the whole pipeline, so they require the
+`WEBHOOK_SECRET`. Present it as an `X-Sentinel-Token: <secret>` header, an
+`Authorization: Bearer <secret>` header (both keep it out of URLs and access logs), or a
+`?token=<secret>` query param (Jira webhooks can only put it in the URL). The check is
+constant-time. If `WEBHOOK_SECRET` is unset the endpoints are **open** and Sentinel logs a
+startup warning — set it in production. `GET /health` is always unauthenticated (liveness).
 
 Audit trail: `docker compose exec sentinel tail -f /data/audit.jsonl` — every dispatch,
 transition, reclaim and escalation (mirrored to Jira comments where the docs require it).

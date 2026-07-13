@@ -73,6 +73,7 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   └── test_notify.py         # outbound alert channel: payload shape, disabled default, error-swallowing
 │   └── test_jira_retry.py     # transient-failure retry: 429/5xx, transport errors, idempotency, give-up
 │   └── test_audit.py          # audit rotation: size trigger, retention cap, no recent-record loss, disabled mode
+│   └── test_server_auth.py    # control-plane auth: header/bearer/query, constant-time, wrong/missing 403, open mode
 ├── conftest.py                # inserts repo root into sys.path (bare `pytest` support)
 ├── Dockerfile                 # python:3.12-slim + git/curl (for shell roles); entrypoint serve|doctor
 ├── docker-compose.yml         # sentinel service (port 8080, docs+config mounted ro, /data volume) + doctor profile
@@ -116,8 +117,11 @@ Jira webhooks ─┐                          ┌─> AgentRunner._loop (LLM too
    `Notifier`, `Orchestrator`; the FastAPI lifespan starts `orchestrator.run_forever()` as a background
    task. Endpoints: `GET /health` (status: starting/paused/ok/degraded — degraded after ≥2
    consecutive sweep failures, paused while the operator kill-switch is engaged),
-   `POST /webhook/jira?token=…`, `POST /sweep?token=…`, `POST /pause?token=…&reason=…`,
-   `POST /resume?token=…` (all mutating endpoints share the webhook token).
+   `POST /webhook/jira`, `POST /sweep`, `POST /pause?reason=…`, `POST /resume`. The four
+   mutating endpoints share one guard (`require_auth` → `_authorized`): the `WEBHOOK_SECRET`
+   presented as an `X-Sentinel-Token`/`Authorization: Bearer` header or `?token=` query
+   param, compared **constant-time** (`hmac.compare_digest`); unset secret = open + a
+   startup warning; `/health` is always unauthenticated.
    Webhook handling is fire-and-forget with strong task references (asyncio GC pitfall).
 2. **`orchestrator.py`** — startup retries with backoff (Jira may boot alongside). Every
    `sweep_interval` (900 s) it JQL-searches all agent-owned statuses (ORDER BY updated ASC,
@@ -323,7 +327,11 @@ is tested end to end without a model.
   `SENTINEL_ALERT_WEBHOOK_URL` is set, `notify.py` pushes escalations and pause/resume to a
   chat webhook (Slack-compatible, best-effort). Richer routing (per-event severity, paging)
   is still expected to be wired downstream of that webhook.
-- No auth on `/health`; webhook/sweep share one token; webhook is plain HTTP in examples.
+- The four mutating endpoints (`/webhook/jira`, `/sweep`, `/pause`, `/resume`) share one
+  `WEBHOOK_SECRET`, now checked **constant-time** and acceptable via header (not just the
+  URL); `/health` is intentionally unauthenticated; transport is still plain HTTP in the
+  examples (terminate TLS at a reverse proxy). An unset secret leaves the endpoints open
+  (with a startup warning).
 - Git history: initial docs (`docs/` first), then the platform build, then a hardening
   series (pagination/GC fixes, agent-loop tests, lease heartbeats for queue claims,
   pre-flight rejection ordering, idempotent rework counting, degraded-health surfacing,
