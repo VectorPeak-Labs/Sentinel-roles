@@ -291,6 +291,40 @@ def test_resume_restores_dispatch(settings, tmp_path):
     assert orch.runner.runs == [("03-business-analyst", "SENT-1")]
 
 
+class RecordingNotifier:
+    """Captures notify() calls so tests can assert an alert fired."""
+    def __init__(self):
+        self.events: list[tuple[str, str | None]] = []
+
+    async def notify(self, event, text, *, ticket=None, **fields):
+        self.events.append((event, ticket))
+        return True
+
+    async def close(self):
+        pass
+
+
+def test_escalation_fires_notification(settings, tmp_path):
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    orch.notifier = RecordingNotifier()
+    # count > 1 => retry budget exhausted => escalate
+    jira.properties[("SENT-1", PROP_RETRIES)] = {"count": 2}
+    run(orch._evaluate_ticket(issue("SENT-1", "Business Requirements")))
+    assert "needs-human" in jira.labels["SENT-1"]
+    assert orch.notifier.events == [("orchestrator_escalation", "SENT-1")]
+
+
+def test_pause_and_resume_fire_notifications(settings, tmp_path):
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    orch.settings.data_dir = tmp_path
+    orch.notifier = RecordingNotifier()
+    run(orch.pause(reason="incident", by="alice"))
+    run(orch.resume(by="alice"))
+    assert [e[0] for e in orch.notifier.events] == ["pipeline_paused", "pipeline_resumed"]
+
+
 def test_pause_state_survives_restart(settings, tmp_path):
     jira = FakeJira()
     orch = make_orchestrator(settings, jira, tmp_path)

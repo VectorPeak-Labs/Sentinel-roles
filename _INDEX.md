@@ -49,6 +49,7 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   ├── jira.py                # async Jira Server/DC client (httpx); issue-property state keys; attachment up/download
 │   ├── lease.py               # LeaseManager: claim / heartbeat / release / reclaim protocol
 │   ├── llm.py                 # thin AsyncOpenAI wrapper pointed at LiteLLM
+│   ├── notify.py              # outbound alert channel: POST escalations/pause to a webhook (Slack-compatible)
 │   ├── config.py              # env settings + config/pipeline.yml loader (RoleConfig, Settings)
 │   ├── audit.py               # append-only JSONL audit log (thread-locked)
 │   └── doctor.py              # pre-flight CLI: Jira/project/statuses/LiteLLM/role-doc checks
@@ -69,6 +70,7 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   └── test_tools_reject.py   # reject_to_rework pre-flight ordering (no orphaned payloads)
 │   └── test_run_command.py    # workspace containment (path-aware, not string-prefix)
 │   └── test_attachments.py    # evidence channel: attach_file/get_attachment + containment
+│   └── test_notify.py         # outbound alert channel: payload shape, disabled default, error-swallowing
 ├── conftest.py                # inserts repo root into sys.path (bare `pytest` support)
 ├── Dockerfile                 # python:3.12-slim + git/curl (for shell roles); entrypoint serve|doctor
 ├── docker-compose.yml         # sentinel service (port 8080, docs+config mounted ro, /data volume) + doctor profile
@@ -109,7 +111,7 @@ Jira webhooks ─┐                          ┌─> AgentRunner._loop (LLM too
 ```
 
 1. **`server.py`** loads settings at import, builds `JiraClient`, `LLM`, `AuditLog`,
-   `Orchestrator`; the FastAPI lifespan starts `orchestrator.run_forever()` as a background
+   `Notifier`, `Orchestrator`; the FastAPI lifespan starts `orchestrator.run_forever()` as a background
    task. Endpoints: `GET /health` (status: starting/paused/ok/degraded — degraded after ≥2
    consecutive sweep failures, paused while the operator kill-switch is engaged),
    `POST /webhook/jira?token=…`, `POST /sweep?token=…`, `POST /pause?token=…&reason=…`,
@@ -235,7 +237,8 @@ posts an explanatory comment.
 **Environment** (`.env`, see `.env.example`): required `JIRA_BASE_URL`, `JIRA_PAT`,
 `JIRA_PROJECT_KEY`, `LITELLM_BASE_URL` (`/v1` auto-appended), `LITELLM_API_KEY`.
 Optional: `SENTINEL_DEFAULT_MODEL` (default `gpt-4o`), `SENTINEL_REVIEWER_MODEL`,
-`WEBHOOK_SECRET`, `DATA_DIR` (/data), `DOCS_DIR` (docs), `SENTINEL_CONFIG`
+`WEBHOOK_SECRET`, `SENTINEL_ALERT_WEBHOOK_URL` (outbound alert webhook; empty = disabled),
+`DATA_DIR` (/data), `DOCS_DIR` (docs), `SENTINEL_CONFIG`
 (config/pipeline.yml), `SENTINEL_SWEEP_INTERVAL` (900), `SENTINEL_LEASE_TIMEOUT` (1800),
 `SENTINEL_HEARTBEAT_INTERVAL` (600), `SENTINEL_MAX_AGENT_TURNS` (80), `SENTINEL_LOG_LEVEL`.
 
@@ -302,8 +305,10 @@ is tested end to end without a model.
   (concurrency is per-status WIP limits inside one asyncio process).
 - `commands:` in `pipeline.yml` are intentionally blank — the platform is generic until a
   project fills them in.
-- Notifications = Jira comments + `needs-human` label only; external alerting (chat pings)
-  is expected to be wired via Jira automation on that label.
+- Notifications: Jira comments + `needs-human` label are always written; additionally, if
+  `SENTINEL_ALERT_WEBHOOK_URL` is set, `notify.py` pushes escalations and pause/resume to a
+  chat webhook (Slack-compatible, best-effort). Richer routing (per-event severity, paging)
+  is still expected to be wired downstream of that webhook.
 - No auth on `/health`; webhook/sweep share one token; webhook is plain HTTP in examples.
 - Git history: initial docs (`docs/` first), then the platform build, then a hardening
   series (pagination/GC fixes, agent-loop tests, lease heartbeats for queue claims,

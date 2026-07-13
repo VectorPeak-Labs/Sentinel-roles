@@ -25,6 +25,7 @@ from .jira import (JiraClient, JiraError, PROP_DEPLOYED, PROP_LEASE, PROP_RETRIE
                    PROP_REWORK, PROP_WAITING)
 from .lease import LeaseManager
 from .llm import LLM
+from .notify import Notifier
 from .payloads import find_payload, validate_handoff, validate_rejection
 
 log = logging.getLogger("sentinel.tools")
@@ -63,6 +64,7 @@ class ToolContext:
     role: RoleConfig
     ticket: str | None            # the leased ticket for ticket-scoped roles, else None
     workspace: Path
+    notifier: Notifier | None = None  # outbound alert channel (None = disabled)
     extra_leased: set[str] = field(default_factory=set)  # tickets a queue role leased itself
 
     @property
@@ -513,6 +515,13 @@ async def _escalate(ctx: ToolContext, args: dict) -> ToolResult:
     ctx.extra_leased.discard(key)
     ctx.audit.record("escalation", role=ctx.role.role_id, ticket=key, reason=args["reason"],
                      decision_needed=args["decision_needed"])
+    if ctx.notifier is not None:
+        await ctx.notifier.notify(
+            "agent_escalation",
+            f"🚨 {ctx.settings.jira_project} {key} escalated by {ctx.role.role_id} — "
+            f"needs a human. {args['reason']} → {args['decision_needed']}",
+            ticket=key, source=ctx.role.role_id, reason=args["reason"],
+            decision_needed=args["decision_needed"])
     terminal = ctx.role.trigger_type == "ticket" and key == ctx.ticket
     return ToolResult(f"{key} escalated and frozen", terminal=terminal)
 
