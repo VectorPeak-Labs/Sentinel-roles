@@ -65,6 +65,8 @@ class Settings:
     heartbeat_interval: int
     max_agent_turns: int
     jira_max_retries: int
+    audit_max_bytes: int
+    audit_backup_count: int
     log_level: str
 
     rework_limit: int = 2
@@ -116,6 +118,8 @@ def load_settings(config_path: str | os.PathLike | None = None) -> Settings:
         heartbeat_interval=int(os.environ.get("SENTINEL_HEARTBEAT_INTERVAL", "600")),
         max_agent_turns=int(os.environ.get("SENTINEL_MAX_AGENT_TURNS", "80")),
         jira_max_retries=int(os.environ.get("SENTINEL_JIRA_MAX_RETRIES", "3")),
+        audit_max_bytes=int(os.environ.get("SENTINEL_AUDIT_MAX_BYTES", "50000000")),
+        audit_backup_count=int(os.environ.get("SENTINEL_AUDIT_BACKUP_COUNT", "5")),
         log_level=os.environ.get("SENTINEL_LOG_LEVEL", "INFO"),
     )
 
