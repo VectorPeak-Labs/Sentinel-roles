@@ -152,6 +152,9 @@ Jira webhooks ─┐                          ┌─> AgentRunner._loop (LLM too
    replay compatibility) → dispatch tools → terminal tool ends the run. Prose without tool
    calls gets a reminder message. Turn cap (80) or crash ⇒ release leases, bump
    `sentinel.retries`, comment; the orchestrator then retries once, then escalates.
+   **Cancellation** (shutdown/redeploy) is a fourth exit: the run releases every lease it
+   holds (own ticket + queue-claimed) *without* bumping retries and re-raises, so a redeploy
+   frees tickets immediately instead of stranding them until the stale-lease timeout.
    A heartbeat task refreshes every held lease (own ticket + queue-claimed) every 600 s;
    a lost lease means a human/orchestrator intervened — stop touching that ticket.
 4. **`tools.py`** — the enforcement layer (see §5). Terminal tools:
@@ -252,7 +255,7 @@ Optional: `SENTINEL_DEFAULT_MODEL` (default `gpt-4o`), `SENTINEL_REVIEWER_MODEL`
 (config/pipeline.yml), `SENTINEL_SWEEP_INTERVAL` (900), `SENTINEL_LEASE_TIMEOUT` (1800),
 `SENTINEL_HEARTBEAT_INTERVAL` (600), `SENTINEL_MAX_AGENT_TURNS` (80),
 `SENTINEL_JIRA_MAX_RETRIES` (3), `SENTINEL_AUDIT_MAX_BYTES` (50 MB; 0 = unbounded),
-`SENTINEL_AUDIT_BACKUP_COUNT` (5), `SENTINEL_LOG_LEVEL`.
+`SENTINEL_AUDIT_BACKUP_COUNT` (5), `SENTINEL_SHUTDOWN_GRACE` (10), `SENTINEL_LOG_LEVEL`.
 
 **`config/pipeline.yml`** supports `${VAR}` / `${VAR:default}` expansion (recursive, done
 in `config._expand_env`). Defines: `rework_limit` (2), `split_threshold_points` (8),
@@ -301,7 +304,11 @@ is tested end to end without a model.
 - **Idempotency under retries**: rework counting keys off the rejection comment id;
   a clean stage exit (validated handoff or successful transition) resets `sentinel.retries`.
 - **Fail-safe loop ends**: every agent run ends via exactly one terminal tool, the turn
-  cap, or the crash handler — all three release leases and leave a retry breadcrumb.
+  cap, the crash handler, or cancellation — all release the leases they hold (the crash path
+  also leaves a retry breadcrumb; cancellation does not, since a redeploy is not a failure).
+  On shutdown `orchestrator.stop()` cancels every running agent and waits up to
+  `SENTINEL_SHUTDOWN_GRACE` (10 s) for that cleanup to finish before the Jira client closes,
+  with an idempotent fallback release for ticket-scoped roles.
 - **Escalation is the designed fallback everywhere** (missing commands, missing workflow
   edges, ambiguity, rework loops, repeated crashes): label + comment + freeze, human
   removes the label to resume.

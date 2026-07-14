@@ -120,6 +120,17 @@ class AgentRunner:
         self.audit.record("dispatch", role=role.role_id, ticket=ticket)
         try:
             await self._loop(ctx, kickoff)
+        except asyncio.CancelledError:
+            # Shutdown / redeploy: release every lease this run holds so the ticket
+            # is free immediately instead of frozen until the stale-lease timeout
+            # (~30 min). This is NOT a failure, so do not bump the retry counter.
+            for key in ([ticket] if ticket else []) + list(ctx.extra_leased):
+                try:
+                    await self.leases.release(key)
+                except Exception:
+                    log.warning("could not release lease on %s during shutdown", key)
+            self.audit.record("agent_cancelled", role=role.role_id, ticket=ticket)
+            raise
         except Exception as e:
             log.exception("agent run %s/%s crashed", role.role_id, ticket)
             self.audit.record("agent_crash", role=role.role_id, ticket=ticket, error=str(e))

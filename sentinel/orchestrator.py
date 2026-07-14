@@ -154,8 +154,21 @@ class Orchestrator:
 
     async def stop(self) -> None:
         self._stopped.set()
-        for (role_id, ticket), (task, _) in list(self.running.items()):
+        running = list(self.running.items())
+        tasks = [task for _, (task, _) in running]
+        for task in tasks:
             task.cancel()
+        # Let each cancelled agent run its own cleanup (release the ticket lease it
+        # holds *and* any tickets a queue role self-claimed) before the HTTP clients
+        # close in the lifespan shutdown. Bounded so one stuck agent can't hang exit.
+        if tasks:
+            try:
+                await asyncio.wait(tasks, timeout=self.settings.shutdown_grace_seconds)
+            except Exception:
+                log.warning("error while draining agents on shutdown")
+        # Fallback for ticket-scoped roles whose cleanup did not finish in time
+        # (release is idempotent, so double-releasing a freed lease is harmless).
+        for (role_id, ticket), (task, _) in running:
             if ticket and self.leases:
                 try:
                     await self.leases.release(ticket)
