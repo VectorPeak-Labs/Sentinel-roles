@@ -136,6 +136,12 @@ Alerting is **disabled by default** and **best-effort** — a slow or failing en
 logged and never blocks or crashes the pipeline. Leave the URL unset to keep Jira comments
 as the only channel (or wire your own automation on the `needs-human` label instead).
 
+Escalations also **re-alert if a human forgets them**: each sweep re-surfaces any ticket
+left frozen (`needs-human`/`handoff-invalid`) and untouched for longer than
+`SENTINEL_STALE_ESCALATION_HOURS` (default 24 h), at most once per window per ticket. This
+upholds ORC-1 ("nothing silently stuck") even when the first alert goes unanswered. Set the
+value to `0` to disable the reminders.
+
 ## Endpoints
 
 | Endpoint | Purpose |

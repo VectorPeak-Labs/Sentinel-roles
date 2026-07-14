@@ -23,6 +23,7 @@ COUNTERS: dict[str, str] = {
     "sweep_failures_total": "Board sweeps that failed (Jira unreachable, etc.).",
     "transitions_validated_total": "Agent transitions accepted with a valid handoff payload.",
     "handoff_invalid_total": "Agent transitions rejected for a missing/invalid handoff payload.",
+    "stale_escalation_reminders_total": "Reminders sent for tickets left frozen awaiting a human.",
 }
 
 

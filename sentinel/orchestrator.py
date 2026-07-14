@@ -12,13 +12,13 @@ import asyncio
 import json
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from .agent import AgentRunner
 from .audit import AuditLog
 from .config import RoleConfig, Settings
-from .jira import (JiraClient, JiraError, PROP_LEASE, PROP_RETRIES, PROP_REWORK,
-                   PROP_WAITING)
+from .jira import (JiraClient, JiraError, PROP_LEASE, PROP_REMINDED, PROP_RETRIES,
+                   PROP_REWORK, PROP_WAITING)
 from .lease import LeaseManager
 from .llm import LLM
 from .metrics import Metrics
@@ -243,6 +243,48 @@ class Orchestrator:
                 except Exception:
                     log.exception("evaluation failed for %s", issue.get("key"))
             await self._evaluate_queues(issues)
+        # Re-surface escalations a human has left frozen (ORC-1: nothing silently stuck).
+        try:
+            await self._remind_stale_escalations(issues)
+        except Exception:
+            log.exception("stale-escalation scan failed")
+
+    async def _remind_stale_escalations(self, issues: list[dict]) -> None:
+        """Escalation alerts fire once when a ticket freezes; if a human never
+        acts, the ticket sits `needs-human` indefinitely with no further signal.
+        Re-alert for tickets frozen and untouched beyond `stale_escalation_hours`,
+        deduped per ticket to at most one reminder per window (sentinel.reminded)."""
+        hours = self.settings.stale_escalation_hours
+        if hours <= 0:
+            return
+        threshold = timedelta(hours=hours)
+        now = datetime.now(timezone.utc)
+        nh = self.settings.label("needs_human")
+        hi = self.settings.label("handoff_invalid")
+        for issue in issues:
+            key = issue.get("key")
+            fields = issue.get("fields", {})
+            labels = fields.get("labels") or []
+            if nh not in labels and hi not in labels:
+                continue
+            updated = _parse_ts(fields.get("updated"))
+            if updated and (now - updated) < threshold:
+                continue  # a human touched it recently — not abandoned
+            reminded = await self.jira.get_property(key, PROP_REMINDED) or {}
+            last = _parse_ts(reminded.get("at"))
+            if last and (now - last) < threshold:
+                continue  # already reminded within this window — don't spam
+            await self.jira.set_property(
+                key, PROP_REMINDED, {"at": now.isoformat(timespec="seconds")})
+            self.metrics.inc("stale_escalation_reminders_total")
+            self.audit.record("stale_escalation_reminder", ticket=key, hours=hours,
+                              updated=fields.get("updated"))
+            await self.notifier.notify(
+                "stale_escalation",
+                f"⏰ {self.settings.jira_project} {key} has been frozen awaiting a human "
+                f"for over {int(hours)}h and nobody has acted. Remove `{nh}` to resume "
+                f"or take the decision the ticket is blocked on.",
+                ticket=key, hours=hours)
 
     def _compute_board_state(self, issues: list[dict]) -> None:
         """Snapshot the board for /metrics: per-status queue depth plus how many

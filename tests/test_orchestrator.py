@@ -5,13 +5,15 @@ dispatched, when a ticket is skipped, reclaimed, or escalated (ORC-1..4).
 """
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 
 import pytest
 import yaml
 
 from sentinel.audit import AuditLog
 from sentinel.config import load_settings
-from sentinel.jira import PROP_LEASE, PROP_RETRIES, PROP_REWORK, PROP_WAITING
+from sentinel.jira import (PROP_LEASE, PROP_REMINDED, PROP_RETRIES, PROP_REWORK,
+                           PROP_WAITING)
 from sentinel.lease import LeaseManager
 from sentinel.orchestrator import Orchestrator
 
@@ -352,6 +354,60 @@ def test_metrics_count_dispatch_and_escalation(settings, tmp_path):
     snap = orch.metrics.snapshot()
     assert snap["dispatches_total"] == 1
     assert snap["escalations_total"] == 1
+
+
+def _ago(hours):
+    return (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat(timespec="seconds")
+
+
+def frozen_issue(key="SENT-1", hours_since_update=48, labels=("needs-human",)):
+    return issue(key, "Rework", labels=list(labels), updated=_ago(hours_since_update))
+
+
+def test_stale_escalation_is_reminded(settings, tmp_path):
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    orch.notifier = RecordingNotifier()
+    run(orch._remind_stale_escalations([frozen_issue("SENT-1", hours_since_update=48)]))
+    assert orch.notifier.events == [("stale_escalation", "SENT-1")]
+    assert ("SENT-1", PROP_REMINDED) in jira.properties
+    assert orch.metrics.snapshot()["stale_escalation_reminders_total"] == 1
+
+
+def test_recently_touched_escalation_not_reminded(settings, tmp_path):
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    orch.notifier = RecordingNotifier()
+    # a human commented an hour ago (updated is recent) -> not abandoned
+    run(orch._remind_stale_escalations([frozen_issue("SENT-1", hours_since_update=1)]))
+    assert orch.notifier.events == []
+
+
+def test_reminder_deduped_within_window(settings, tmp_path):
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    orch.notifier = RecordingNotifier()
+    jira.properties[("SENT-1", PROP_REMINDED)] = {"at": _ago(1)}  # reminded an hour ago
+    run(orch._remind_stale_escalations([frozen_issue("SENT-1", hours_since_update=48)]))
+    assert orch.notifier.events == []                             # once per window only
+
+
+def test_non_frozen_ticket_not_reminded(settings, tmp_path):
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    orch.notifier = RecordingNotifier()
+    run(orch._remind_stale_escalations(
+        [issue("SENT-1", "Rework", updated=_ago(72))]))  # old but not needs-human
+    assert orch.notifier.events == []
+
+
+def test_reminders_disabled_when_hours_zero(settings, tmp_path):
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    orch.settings.stale_escalation_hours = 0
+    orch.notifier = RecordingNotifier()
+    run(orch._remind_stale_escalations([frozen_issue("SENT-1", hours_since_update=999)]))
+    assert orch.notifier.events == []
 
 
 def test_pause_and_resume_fire_notifications(settings, tmp_path):

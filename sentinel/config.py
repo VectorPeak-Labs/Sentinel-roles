@@ -68,6 +68,7 @@ class Settings:
     audit_max_bytes: int
     audit_backup_count: int
     shutdown_grace_seconds: float
+    stale_escalation_hours: float
     log_level: str
 
     rework_limit: int = 2
@@ -122,6 +123,7 @@ def load_settings(config_path: str | os.PathLike | None = None) -> Settings:
         audit_max_bytes=int(os.environ.get("SENTINEL_AUDIT_MAX_BYTES", "50000000")),
         audit_backup_count=int(os.environ.get("SENTINEL_AUDIT_BACKUP_COUNT", "5")),
         shutdown_grace_seconds=float(os.environ.get("SENTINEL_SHUTDOWN_GRACE", "10")),
+        stale_escalation_hours=float(os.environ.get("SENTINEL_STALE_ESCALATION_HOURS", "24")),
         log_level=os.environ.get("SENTINEL_LOG_LEVEL", "INFO"),
     )
 
