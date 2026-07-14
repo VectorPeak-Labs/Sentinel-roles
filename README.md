@@ -138,10 +138,18 @@ as the only channel (or wire your own automation on the `needs-human` label inst
 | Endpoint | Purpose |
 |---|---|
 | `GET /health` | liveness + pause state + currently running agents (no auth) |
+| `GET /metrics` | Prometheus metrics: dispatch/escalation/reclaim/sweep-failure counters + live gauges (no auth) |
 | `POST /webhook/jira` | Jira webhook receiver |
 | `POST /sweep` | force an immediate board sweep |
 | `POST /pause?reason=…` | freeze all dispatch (in-flight runs drain); survives restart |
 | `POST /resume` | lift the pause and resume dispatching |
+
+`GET /metrics` exposes the Prometheus text format for scraping — monotonic counters
+(`sentinel_dispatches_total`, `sentinel_escalations_total`, `sentinel_lease_reclaims_total`,
+`sentinel_sweep_failures_total`, `sentinel_transitions_validated_total`,
+`sentinel_handoff_invalid_total`) plus live gauges (`sentinel_paused`,
+`sentinel_running_agents`, `sentinel_consecutive_sweep_failures`, `sentinel_sweeps_total`, …).
+Point a Prometheus scraper at it to alert on escalation spikes or sustained sweep failures.
 
 The four `POST` endpoints can freeze or nudge the whole pipeline, so they require the
 `WEBHOOK_SECRET`. Present it as an `X-Sentinel-Token: <secret>` header, an
