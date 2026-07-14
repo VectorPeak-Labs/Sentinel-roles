@@ -43,3 +43,20 @@ def test_render_is_valid_exposition_shape():
     assert out.endswith("\n")
     for line in out.splitlines():
         assert line.startswith("#") or line.startswith("sentinel_")
+
+
+def test_render_labeled_gauges():
+    out = render(Metrics().snapshot(), gauges={},
+                 labeled_gauges={"tickets_in_status": (
+                     "per status",
+                     [({"status": "In Progress"}, 3), ({"status": "Rework"}, 1)])})
+    assert "# TYPE sentinel_tickets_in_status gauge" in out
+    assert 'sentinel_tickets_in_status{status="In Progress"} 3' in out
+    assert 'sentinel_tickets_in_status{status="Rework"} 1' in out
+
+
+def test_label_values_are_escaped():
+    out = render(Metrics().snapshot(), gauges={},
+                 labeled_gauges={"x": ("h", [({"status": 'a"b\\c'}, 1)])})
+    # both the quote and the backslash must be escaped in the exposition
+    assert r'sentinel_x{status="a\"b\\c"} 1' in out

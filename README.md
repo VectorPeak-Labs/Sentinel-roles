@@ -150,9 +150,13 @@ as the only channel (or wire your own automation on the `needs-human` label inst
 `GET /metrics` exposes the Prometheus text format for scraping — monotonic counters
 (`sentinel_dispatches_total`, `sentinel_escalations_total`, `sentinel_lease_reclaims_total`,
 `sentinel_sweep_failures_total`, `sentinel_transitions_validated_total`,
-`sentinel_handoff_invalid_total`) plus live gauges (`sentinel_paused`,
-`sentinel_running_agents`, `sentinel_consecutive_sweep_failures`, `sentinel_sweeps_total`, …).
-Point a Prometheus scraper at it to alert on escalation spikes or sustained sweep failures.
+`sentinel_handoff_invalid_total`), process gauges (`sentinel_paused`,
+`sentinel_running_agents`, `sentinel_consecutive_sweep_failures`, `sentinel_sweeps_total`, …),
+and **board-backlog gauges** refreshed each sweep: `sentinel_tickets_in_status{status="…"}`
+(queue depth per stage), `sentinel_needs_human_tickets`, `sentinel_handoff_invalid_tickets`,
+`sentinel_agent_tickets_total`. Point a Prometheus scraper at it to alert on escalation
+spikes, sustained sweep failures, a growing Rework/To-Do backlog, or escalations left
+unresolved (`needs_human_tickets > 0` for too long).
 
 The four `POST` endpoints can freeze or nudge the whole pipeline, so they require the
 `WEBHOOK_SECRET`. Present it as an `X-Sentinel-Token: <secret>` header, an
