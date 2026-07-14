@@ -22,6 +22,7 @@ PROP_REWORK = "sentinel.rework"          # {"count": n, "rejected_from": "...", 
 PROP_WAITING = "sentinel.waiting"        # {"since": iso, "reason": str, "wake_at": iso|null}
 PROP_DEPLOYED = "sentinel.deployed"      # {"<env>": {"build": str, "at": iso}}
 PROP_RETRIES = "sentinel.retries"        # {"count": n} — orchestrator crash/reclaim retries
+PROP_REMINDED = "sentinel.reminded"      # {"at": iso} — last stale-escalation reminder
 
 
 class JiraError(RuntimeError):

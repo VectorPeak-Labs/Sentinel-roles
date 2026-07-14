@@ -144,6 +144,9 @@ Jira webhooks ─┐                          ┌─> AgentRunner._loop (LLM too
    the top of `_evaluate_ticket`/`_evaluate_queues`: when engaged, no agent is dispatched and
    no repair side effects run; in-flight runs drain. The flag is persisted to
    `DATA_DIR/pause.json` and reloaded in `start()` so a restart mid-incident stays frozen.
+   Each sweep also runs `_remind_stale_escalations`: any ticket left `needs-human`/
+   `handoff-invalid` and untouched beyond `SENTINEL_STALE_ESCALATION_HOURS` (24 h) is
+   re-alerted via the Notifier, deduped to one reminder per window via `sentinel.reminded`.
    `_on_status_change` (ORC-5): an **agent** transition without a matching valid
    `agent_handoff` in the last 10 comments ⇒ label `handoff-invalid` + escalate (never
    reverted); a **human** transition is logged and honored (universal rule 6); a clean
@@ -215,6 +218,7 @@ Key enforcement details:
 | `sentinel.waiting` | `{since, reason, role, wake_at}` — parked on a human, wake on activity or timeout (default 24 h) |
 | `sentinel.deployed` | `{<env>: {build, at, by}}` per test/staging/production |
 | `sentinel.retries` | `{count}` — crash/reclaim/turn-cap retries per stage |
+| `sentinel.reminded` | `{at}` — last stale-escalation reminder (dedupes re-alerts per window) |
 
 **`agent_handoff` payload** (validated by `payloads.validate_handoff`): required `role`,
 `ticket`, `timestamp`, `verdict` (pass|reject|escalate), `from_status`, `to_status`;
@@ -257,7 +261,8 @@ Optional: `SENTINEL_DEFAULT_MODEL` (default `gpt-4o`), `SENTINEL_REVIEWER_MODEL`
 (config/pipeline.yml), `SENTINEL_SWEEP_INTERVAL` (900), `SENTINEL_LEASE_TIMEOUT` (1800),
 `SENTINEL_HEARTBEAT_INTERVAL` (600), `SENTINEL_MAX_AGENT_TURNS` (80),
 `SENTINEL_JIRA_MAX_RETRIES` (3), `SENTINEL_AUDIT_MAX_BYTES` (50 MB; 0 = unbounded),
-`SENTINEL_AUDIT_BACKUP_COUNT` (5), `SENTINEL_SHUTDOWN_GRACE` (10), `SENTINEL_LOG_LEVEL`.
+`SENTINEL_AUDIT_BACKUP_COUNT` (5), `SENTINEL_SHUTDOWN_GRACE` (10),
+`SENTINEL_STALE_ESCALATION_HOURS` (24; 0 = disabled), `SENTINEL_LOG_LEVEL`.
 
 **`config/pipeline.yml`** supports `${VAR}` / `${VAR:default}` expansion (recursive, done
 in `config._expand_env`). Defines: `rework_limit` (2), `split_threshold_points` (8),
