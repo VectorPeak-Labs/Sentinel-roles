@@ -139,6 +139,7 @@ async def prometheus_metrics() -> str:
     """Prometheus exposition: monotonic counters plus live gauges sampled from
     orchestrator state. Unauthenticated, like /health — scrape it on a trusted
     network (or terminate/authenticate at the reverse proxy)."""
+    board = orchestrator.board_state
     gauges = {
         "up": ("1 when the process is serving.", 1),
         "paused": ("1 when the pipeline is paused (no dispatch).", int(orchestrator.paused)),
@@ -148,8 +149,20 @@ async def prometheus_metrics() -> str:
         "sweeps_total": ("Board sweeps completed since start.", orchestrator.sweep_count),
         "pending_webhook_evaluations":
             ("Tickets queued for a debounced webhook evaluation.", len(orchestrator._pending_keys)),
+        # Board backlog, refreshed each sweep.
+        "agent_tickets_total":
+            ("Tickets in agent-owned statuses at the last sweep.", board["total"]),
+        "needs_human_tickets":
+            ("Tickets frozen awaiting a human (needs-human).", board["needs_human"]),
+        "handoff_invalid_tickets":
+            ("Tickets flagged handoff-invalid.", board["handoff_invalid"]),
     }
-    return render_metrics(metrics.snapshot(), gauges)
+    labeled = {
+        "tickets_in_status": (
+            "Tickets in each agent-owned status at the last sweep.",
+            [({"status": s}, n) for s, n in sorted(board["by_status"].items())]),
+    }
+    return render_metrics(metrics.snapshot(), gauges, labeled)
 
 
 @app.post("/webhook/jira")

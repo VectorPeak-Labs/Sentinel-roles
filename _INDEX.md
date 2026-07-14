@@ -50,7 +50,7 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   ├── lease.py               # LeaseManager: claim / heartbeat / release / reclaim protocol
 │   ├── llm.py                 # thin AsyncOpenAI wrapper pointed at LiteLLM
 │   ├── notify.py              # outbound alert channel: POST escalations/pause to a webhook (Slack-compatible)
-│   ├── metrics.py             # Prometheus counter registry + text exposition (served at GET /metrics)
+│   ├── metrics.py             # Prometheus counters + labeled-gauge exposition (served at GET /metrics)
 │   ├── config.py              # env settings + config/pipeline.yml loader (RoleConfig, Settings)
 │   ├── audit.py               # append-only JSONL audit log (thread-locked); size-rotated with retention
 │   └── doctor.py              # pre-flight CLI: Jira/project/statuses/LiteLLM/role-doc checks
@@ -120,7 +120,9 @@ Jira webhooks ─┐                          ┌─> AgentRunner._loop (LLM too
    task. Endpoints: `GET /health` (status: starting/paused/ok/degraded — degraded after ≥2
    consecutive sweep failures, paused while the operator kill-switch is engaged),
    `GET /metrics` (Prometheus counters incremented at dispatch/escalation/reclaim/
-   sweep-failure/transition sites + live gauges, unauthenticated like `/health`),
+   sweep-failure/transition sites + process gauges + board-backlog gauges — per-status
+   queue depth and needs-human/handoff-invalid counts snapshotted each sweep into
+   `orchestrator.board_state` — unauthenticated like `/health`),
    `POST /webhook/jira`, `POST /sweep`, `POST /pause?reason=…`, `POST /resume`. The four
    mutating endpoints share one guard (`require_auth` → `_authorized`): the `WEBHOOK_SECRET`
    presented as an `X-Sentinel-Token`/`Authorization: Bearer` header or `?token=` query

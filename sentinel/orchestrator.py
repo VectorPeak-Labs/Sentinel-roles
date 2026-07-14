@@ -71,6 +71,9 @@ class Orchestrator:
         self.sweep_count = 0
         self.consecutive_sweep_failures = 0
         self.last_sweep_error: str | None = None
+        # Board snapshot refreshed each sweep — pipeline backlog for /metrics.
+        self.board_state: dict = {"by_status": {}, "needs_human": 0,
+                                  "handoff_invalid": 0, "total": 0}
         # Global pause (operational kill-switch): when set, no NEW agents are
         # dispatched (ticket or queue); in-flight runs drain to completion. The
         # state is persisted to disk so a container restart mid-incident does not
@@ -232,6 +235,7 @@ class Orchestrator:
                  len(issues), len(self.running), " [PAUSED]" if self.paused else "")
         self.last_sweep_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         self.sweep_count += 1
+        self._compute_board_state(issues)
         async with self._lock:
             for issue in issues:
                 try:
@@ -239,6 +243,25 @@ class Orchestrator:
                 except Exception:
                     log.exception("evaluation failed for %s", issue.get("key"))
             await self._evaluate_queues(issues)
+
+    def _compute_board_state(self, issues: list[dict]) -> None:
+        """Snapshot the board for /metrics: per-status queue depth plus how many
+        tickets are frozen (needs-human) or flagged (handoff-invalid)."""
+        by_status: dict[str, int] = {}
+        needs_human = handoff_invalid = 0
+        nh = self.settings.label("needs_human")
+        hi = self.settings.label("handoff_invalid")
+        for issue in issues:
+            fields = issue.get("fields", {})
+            status = (fields.get("status") or {}).get("name") or "unknown"
+            by_status[status] = by_status.get(status, 0) + 1
+            labels = fields.get("labels") or []
+            if nh in labels:
+                needs_human += 1
+            if hi in labels:
+                handoff_invalid += 1
+        self.board_state = {"by_status": by_status, "needs_human": needs_human,
+                            "handoff_invalid": handoff_invalid, "total": len(issues)}
 
     def _gc_running(self) -> None:
         for key, (task, _) in list(self.running.items()):

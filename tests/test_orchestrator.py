@@ -315,6 +315,32 @@ def test_escalation_fires_notification(settings, tmp_path):
     assert orch.notifier.events == [("orchestrator_escalation", "SENT-1")]
 
 
+def test_sweep_computes_board_state(settings, tmp_path):
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    board = [
+        issue("SENT-1", "In Progress"),
+        issue("SENT-2", "In Progress"),
+        issue("SENT-3", "Rework", labels=["needs-human"]),
+        issue("SENT-4", "Tech Review", labels=["handoff-invalid"]),
+    ]
+
+    async def fake_search(jql, max_results=100, fields=None):
+        return board
+
+    async def main():
+        jira.search = fake_search
+        await orch.sweep()
+
+    asyncio.run(main())
+    bs = orch.board_state
+    assert bs["total"] == 4
+    assert bs["by_status"]["In Progress"] == 2
+    assert bs["by_status"]["Rework"] == 1
+    assert bs["needs_human"] == 1
+    assert bs["handoff_invalid"] == 1
+
+
 def test_metrics_count_dispatch_and_escalation(settings, tmp_path):
     jira = FakeJira()
     orch = make_orchestrator(settings, jira, tmp_path)
