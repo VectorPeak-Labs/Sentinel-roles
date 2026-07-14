@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 
 from openai import AsyncOpenAI
 
@@ -14,6 +15,12 @@ class LLM:
     def __init__(self, base_url: str, api_key: str, default_model: str):
         self.client = AsyncOpenAI(base_url=base_url, api_key=api_key, max_retries=3)
         self.default_model = default_model
+        # Passive health signal (no extra calls): every real chat updates these so
+        # /health and /metrics can show a dead LiteLLM backend instead of reading
+        # 'ok' while every agent run silently crashes and escalates.
+        self.consecutive_failures = 0
+        self.last_error: str | None = None
+        self.last_ok_at: str | None = None
 
     async def chat(self, messages: list[dict], tools: list[dict] | None = None,
                    model: str | None = None, temperature: float | None = None):
@@ -23,7 +30,15 @@ class LLM:
             kwargs["tools"] = tools
         if temperature is not None:
             kwargs["temperature"] = temperature
-        response = await self.client.chat.completions.create(**kwargs)
+        try:
+            response = await self.client.chat.completions.create(**kwargs)
+        except Exception as e:
+            self.consecutive_failures += 1
+            self.last_error = f"{type(e).__name__}: {e}"
+            raise
+        self.consecutive_failures = 0
+        self.last_error = None
+        self.last_ok_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         return response.choices[0].message
 
     async def close(self) -> None:
