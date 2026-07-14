@@ -67,6 +67,7 @@ class Settings:
     jira_max_retries: int
     audit_max_bytes: int
     audit_backup_count: int
+    shutdown_grace_seconds: float
     log_level: str
 
     rework_limit: int = 2
@@ -120,6 +121,7 @@ def load_settings(config_path: str | os.PathLike | None = None) -> Settings:
         jira_max_retries=int(os.environ.get("SENTINEL_JIRA_MAX_RETRIES", "3")),
         audit_max_bytes=int(os.environ.get("SENTINEL_AUDIT_MAX_BYTES", "50000000")),
         audit_backup_count=int(os.environ.get("SENTINEL_AUDIT_BACKUP_COUNT", "5")),
+        shutdown_grace_seconds=float(os.environ.get("SENTINEL_SHUTDOWN_GRACE", "10")),
         log_level=os.environ.get("SENTINEL_LOG_LEVEL", "INFO"),
     )
 

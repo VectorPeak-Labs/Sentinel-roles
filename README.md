@@ -82,7 +82,10 @@ Jira webhooks ─┐                       ┌─> role agent (LLM tool loop ove
 - **Orchestrator** (`sentinel/orchestrator.py`, role 01): dispatches the matching role per
   status, enforces WIP limits, reclaims dead leases (retry once → escalate), blocks any
   ticket with `rework_count > 2`, and validates that every agent transition carries a
-  schema-valid `agent_handoff` payload (ORC-1…6).
+  schema-valid `agent_handoff` payload (ORC-1…6). On shutdown (SIGTERM/redeploy) it cancels
+  in-flight agents and gives them a grace window (`SENTINEL_SHUTDOWN_GRACE`, default 10 s) to
+  release their leases — including tickets a queue role self-claimed — so a redeploy doesn't
+  strand tickets `agent-leased` until the stale-lease timeout.
 - **Resilient Jira access** (`sentinel/jira.py`): every Jira call retries transient
   failures (429/502/503/504 and network blips) with capped exponential backoff + jitter,
   honoring `Retry-After` — so a rate-limit or a brief Jira restart doesn't fail an agent

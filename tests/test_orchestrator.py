@@ -338,6 +338,24 @@ def test_pause_and_resume_fire_notifications(settings, tmp_path):
     assert [e[0] for e in orch.notifier.events] == ["pipeline_paused", "pipeline_resumed"]
 
 
+def test_stop_cancels_agents_and_releases_leases(settings, tmp_path):
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    jira.properties[("SENT-1", PROP_LEASE)] = {
+        "role": "03-business-analyst", "heartbeat": "2099-01-01T00:00:00+00:00"}
+
+    async def main():
+        async def blocker():
+            await asyncio.Event().wait()
+        task = asyncio.create_task(blocker())
+        orch.running[("03-business-analyst", "SENT-1")] = (task, "Business Requirements")
+        await orch.stop()
+        assert task.cancelled()                              # in-flight agent stopped
+        assert ("SENT-1", PROP_LEASE) not in jira.properties  # lease freed, not stranded
+
+    asyncio.run(main())
+
+
 def test_pause_state_survives_restart(settings, tmp_path):
     jira = FakeJira()
     orch = make_orchestrator(settings, jira, tmp_path)
