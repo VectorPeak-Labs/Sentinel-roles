@@ -76,7 +76,7 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   └── test_audit.py          # audit rotation: size trigger, retention cap, no recent-record loss, disabled mode
 │   └── test_server_auth.py    # control-plane auth: header/bearer/query, constant-time, wrong/missing 403, open mode
 │   └── test_metrics.py        # metrics: counter inc/snapshot, Prometheus exposition shape, gauges
-│   └── test_llm.py            # LLM health tracking: consecutive_failures/last_error/last_ok_at
+│   └── test_llm.py            # LLM health tracking: consecutive_failures/last_error/last_ok_at + last_error sanitization
 ├── conftest.py                # inserts repo root into sys.path (bare `pytest` support)
 ├── Dockerfile                 # python:3.12-slim + git/curl (for shell roles); entrypoint serve|doctor
 ├── docker-compose.yml         # sentinel service (port 8080, docs+config mounted ro, /data volume) + doctor profile
@@ -128,7 +128,10 @@ Jira webhooks ─┐                          ┌─> AgentRunner._loop (LLM too
    `POST /webhook/jira`, `POST /sweep`, `POST /pause?reason=…`, `POST /resume`.
    `/health` also reports LiteLLM backend health (`llm.consecutive_failures`, tracked
    passively by `LLM.chat`) and flips to `degraded` after 3 consecutive LLM failures — so a
-   dead LLM backend surfaces instead of reading `ok` while every agent run escalates. The four
+   dead LLM backend surfaces instead of reading `ok` while every agent run escalates.
+   `llm.last_error` is **sanitized** (`_safe_error`: exception type + HTTP status only, never
+   the message — which can carry prompts or API-key-bearing headers) since `/health` and
+   `/metrics` are unauthenticated; the full exception is logged at warning level instead. The four
    mutating endpoints share one guard (`require_auth` → `_authorized`): the `WEBHOOK_SECRET`
    presented as an `X-Sentinel-Token`/`Authorization: Bearer` header or `?token=` query
    param, compared **constant-time** (`hmac.compare_digest`); unset secret = open + a

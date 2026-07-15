@@ -11,6 +11,17 @@ from openai import AsyncOpenAI
 log = logging.getLogger("sentinel.llm")
 
 
+def _safe_error(e: Exception) -> str:
+    """Sanitized error label for the health signal. Exception messages can carry
+    request/response bodies (prompts, API keys in headers), and last_error is
+    exposed on /health and /metrics — so keep only the type and HTTP status."""
+    for attr in ("status_code", "status"):
+        status = getattr(e, attr, None)
+        if isinstance(status, int):
+            return f"{type(e).__name__} (HTTP {status})"
+    return type(e).__name__
+
+
 class LLM:
     def __init__(self, base_url: str, api_key: str, default_model: str):
         self.client = AsyncOpenAI(base_url=base_url, api_key=api_key, max_retries=3)
@@ -34,7 +45,8 @@ class LLM:
             response = await self.client.chat.completions.create(**kwargs)
         except Exception as e:
             self.consecutive_failures += 1
-            self.last_error = f"{type(e).__name__}: {e}"
+            self.last_error = _safe_error(e)
+            log.warning("chat completion failed: %s", e)
             raise
         self.consecutive_failures = 0
         self.last_error = None

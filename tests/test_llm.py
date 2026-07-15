@@ -45,14 +45,27 @@ def test_success_records_last_ok_and_resets_failures():
     assert llm.last_ok_at is not None
 
 
-def test_failure_increments_and_records_error():
-    llm = make_llm([RuntimeError("connection refused"),
-                    RuntimeError("connection refused")])
+def test_failure_increments_and_records_sanitized_error():
+    llm = make_llm([RuntimeError("Bearer sk-secret leaked in body"),
+                    RuntimeError("Bearer sk-secret leaked in body")])
     for _ in range(2):
         with pytest.raises(RuntimeError):
             asyncio.run(llm.chat([{"role": "user", "content": "hi"}]))
     assert llm.consecutive_failures == 2
-    assert "connection refused" in llm.last_error
+    # last_error is exposed on /health and /metrics: only the exception type
+    # may appear there, never the message (which can carry secrets/prompts).
+    assert llm.last_error == "RuntimeError"
+    assert "sk-secret" not in llm.last_error
+
+
+def test_failure_with_status_code_records_type_and_status_only():
+    err = RuntimeError("401 Unauthorized: api key sk-secret rejected")
+    err.status_code = 401
+    llm = make_llm([err])
+    with pytest.raises(RuntimeError):
+        asyncio.run(llm.chat([{"role": "user", "content": "hi"}]))
+    assert llm.last_error == "RuntimeError (HTTP 401)"
+    assert "sk-secret" not in llm.last_error
 
 
 def test_success_after_failures_resets_the_signal():
