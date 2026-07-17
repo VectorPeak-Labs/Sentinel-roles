@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -44,6 +45,46 @@ class AuditLog:
             with self.path.open("a", encoding="utf-8") as f:
                 f.write(line)
         log.info("audit: %s", line.rstrip("\n"))
+
+    # -- querying ------------------------------------------------------------
+
+    def _generations(self) -> list[Path]:
+        """Retained files oldest-first: audit.jsonl.N … audit.jsonl.1, then the
+        live file — so records come out in chronological order."""
+        files = [self._backup(i) for i in range(self.backup_count, 0, -1)]
+        files.append(self.path)
+        return [f for f in files if f.exists()]
+
+    def read_records(self, limit: int = 100, ticket: str | None = None,
+                     event: str | None = None) -> list[dict]:
+        """The newest `limit` records matching the filters, oldest-first.
+
+        Reads across all retained generations under the write lock, so a
+        concurrent rotation can't tear the view. Malformed lines (e.g. a write
+        interrupted by a crash) are skipped, never raised — the query path must
+        stay as unbreakable as the record path."""
+        limit = max(1, int(limit))
+        out: deque[dict] = deque(maxlen=limit)
+        with self._lock:
+            for f in self._generations():
+                try:
+                    lines = f.read_text(encoding="utf-8").splitlines()
+                except OSError as e:
+                    log.warning("could not read audit generation %s: %s", f, e)
+                    continue
+                for line in lines:
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(rec, dict):
+                        continue
+                    if ticket and rec.get("ticket") != ticket:
+                        continue
+                    if event and rec.get("event") != event:
+                        continue
+                    out.append(rec)
+        return list(out)
 
     # -- rotation ------------------------------------------------------------
 

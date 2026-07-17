@@ -121,3 +121,16 @@ def test_metrics_exposes_llm_token_usage_by_role_and_model():
                 '{role="07-implementer",model="gpt-4o"} 5') in out
     finally:
         srv.llm.usage_totals.clear()             # restore for other tests
+
+
+def test_audit_endpoint_returns_filtered_records():
+    srv.audit.record("dispatch", ticket="SENT-77", role="07-implementer")
+    srv.audit.record("escalation", ticket="SENT-77", reason="boom")
+    srv.audit.record("dispatch", ticket="SENT-78", role="03-business-analyst")
+
+    out = asyncio.run(srv.audit_query(limit=100, ticket="SENT-77"))
+    assert out["count"] == 2
+    assert [r["event"] for r in out["records"]] == ["dispatch", "escalation"]
+
+    out = asyncio.run(srv.audit_query(limit=100, ticket="SENT-77", event="escalation"))
+    assert out["count"] == 1 and out["records"][0]["reason"] == "boom"

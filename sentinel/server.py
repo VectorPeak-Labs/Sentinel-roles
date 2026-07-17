@@ -217,6 +217,20 @@ async def jira_webhook(request: Request, _: None = Depends(require_auth)) -> dic
     return {"accepted": True}
 
 
+@app.get("/audit")
+async def audit_query(limit: int = 100, ticket: str = "", event: str = "",
+                      _: None = Depends(require_auth)) -> dict:
+    """Query the audit trail: the newest matching records, oldest-first, across
+    all retained rotation generations. Filters: ?ticket=SENT-42, ?event=dispatch,
+    ?limit=N (max 1000). Auth-guarded like the mutating endpoints — the trail
+    carries ticket activity and error strings, unlike the aggregate /metrics."""
+    limit = max(1, min(int(limit), 1000))
+    # File IO under a threading lock — off the event loop.
+    records = await asyncio.to_thread(
+        audit.read_records, limit, ticket or None, event or None)
+    return {"count": len(records), "records": records}
+
+
 @app.post("/sweep")
 async def trigger_sweep(_: None = Depends(require_auth)) -> dict:
     """Manually trigger a board sweep (same auth as the webhook)."""

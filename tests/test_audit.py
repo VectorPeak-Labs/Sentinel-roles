@@ -82,3 +82,45 @@ def test_record_shape_unchanged(tmp_path):
     assert entry["ticket"] == "SENT-1"
     assert entry["reason"] == "boom"
     assert "at" in entry
+
+
+def test_read_records_returns_newest_with_filters(tmp_path):
+    audit = AuditLog(tmp_path / "audit.jsonl", max_bytes=0)
+    for i in range(5):
+        audit.record("dispatch", ticket=f"SENT-{i}", role="07-implementer")
+    audit.record("escalation", ticket="SENT-2", reason="boom")
+
+    assert len(audit.read_records(limit=3)) == 3                 # limit respected
+    assert audit.read_records(limit=100)[-1]["event"] == "escalation"  # oldest-first
+
+    by_ticket = audit.read_records(limit=100, ticket="SENT-2")
+    assert [r["event"] for r in by_ticket] == ["dispatch", "escalation"]
+
+    by_event = audit.read_records(limit=100, event="escalation")
+    assert len(by_event) == 1 and by_event[0]["reason"] == "boom"
+
+
+def test_read_records_spans_rotated_generations(tmp_path):
+    audit = AuditLog(tmp_path / "audit.jsonl", max_bytes=200, backup_count=3)
+    for i in range(20):
+        audit.record("dispatch", ticket=f"SENT-{i}")
+    assert (tmp_path / "audit.jsonl.1").exists()                 # rotation happened
+
+    records = audit.read_records(limit=1000)
+    tickets = [r["ticket"] for r in records]
+    # chronological across generations, ending with the newest record
+    assert tickets == sorted(tickets, key=lambda t: int(t.split("-")[1]))
+    assert tickets[-1] == "SENT-19"
+
+
+def test_read_records_skips_malformed_lines(tmp_path):
+    path = tmp_path / "audit.jsonl"
+    audit = AuditLog(path, max_bytes=0)
+    audit.record("dispatch", ticket="SENT-1")
+    with path.open("a", encoding="utf-8") as f:
+        f.write('{"torn write no closing\n')                     # crash mid-append
+        f.write('[1, 2, 3]\n')                                   # valid JSON, not a record
+    audit.record("dispatch", ticket="SENT-2")
+
+    records = audit.read_records(limit=100)
+    assert [r["ticket"] for r in records] == ["SENT-1", "SENT-2"]
