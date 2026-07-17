@@ -46,7 +46,10 @@ class LLM:
         except Exception as e:
             self.consecutive_failures += 1
             self.last_error = _safe_error(e)
-            log.warning("chat completion failed: %s", e)
+            # Log the sanitized label, not the exception: client errors can carry
+            # request/response bodies (prompts, bearer tokens), and app logs are
+            # often shipped to shared stores.
+            log.warning("chat completion failed: %s", self.last_error)
             raise
         self.consecutive_failures = 0
         self.last_error = None

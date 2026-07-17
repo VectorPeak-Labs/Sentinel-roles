@@ -68,6 +68,17 @@ def test_failure_with_status_code_records_type_and_status_only():
     assert "sk-secret" not in llm.last_error
 
 
+def test_failure_log_carries_sanitized_error_only(caplog):
+    # The warning log ships to shared log stores just like /health ships to
+    # monitoring: neither may carry the raw exception message.
+    llm = make_llm([RuntimeError("Bearer sk-secret leaked in body")])
+    with caplog.at_level("WARNING", logger="sentinel.llm"):
+        with pytest.raises(RuntimeError):
+            asyncio.run(llm.chat([{"role": "user", "content": "hi"}]))
+    assert "sk-secret" not in caplog.text
+    assert "RuntimeError" in caplog.text
+
+
 def test_success_after_failures_resets_the_signal():
     llm = make_llm([RuntimeError("down"), "ok"])
     with pytest.raises(RuntimeError):
