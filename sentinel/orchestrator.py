@@ -20,7 +20,7 @@ from .config import RoleConfig, Settings
 from .jira import (JiraClient, JiraError, PROP_LEASE, PROP_REMINDED, PROP_RETRIES,
                    PROP_REWORK, PROP_WAITING)
 from .lease import LeaseManager
-from .llm import LLM
+from .llm import DEGRADED_AFTER as LLM_DEGRADED_AFTER, LLM
 from .metrics import Metrics
 from .notify import Notifier
 from .payloads import find_payload, validate_handoff
@@ -81,6 +81,11 @@ class Orchestrator:
         self.paused = False
         self.paused_at: str | None = None
         self.pause_reason: str | None = None
+        # Automatic LLM outage gate: while the LiteLLM backend is failing, stop
+        # dispatching (each dispatch would just crash on its first chat call,
+        # burn the ticket's retry budget and flood the board with needs-human).
+        # Unlike the operator pause it lifts itself when a probe succeeds.
+        self.llm_gated = False
 
     async def start(self) -> None:
         me = await self.jira.myself()
@@ -156,6 +161,46 @@ class Orchestrator:
             await self.pause(
                 reason=f"daily LLM token budget exhausted ({spent} >= {budget} tokens)",
                 by="token-budget")
+
+    async def _check_llm_gate(self) -> None:
+        """LLM outage circuit breaker (the behavioral half of the /health
+        'degraded' signal): while the backend is failing, dispatching agents
+        only converts the outage into per-ticket damage — every run crashes on
+        its first chat call, burns the ticket's retry budget and escalates.
+        Gate dispatch instead, and probe once per sweep so the gate lifts
+        itself the moment the backend recovers (a successful chat resets
+        consecutive_failures). No probe = no recovery signal, since a gated
+        pipeline makes no LLM calls of its own — the budget-breaker lesson."""
+        if self.llm is None:
+            return
+        if self.llm.consecutive_failures >= LLM_DEGRADED_AFTER:
+            if not self.llm_gated:
+                self.llm_gated = True
+                self.metrics.inc("llm_gate_engagements_total")
+                log.warning("LLM backend failing (%d consecutive failures) — "
+                            "dispatch suspended", self.llm.consecutive_failures)
+                self.audit.record("llm_gate_engaged",
+                                  failures=self.llm.consecutive_failures,
+                                  error=self.llm.last_error)
+                await self.notifier.notify(
+                    "llm_outage",
+                    f"🛑 {self.settings.jira_project} LLM backend is failing "
+                    f"({self.llm.last_error}) — dispatch suspended until it recovers",
+                    error=self.llm.last_error)
+            try:
+                await self.llm.chat(
+                    [{"role": "user", "content": "Reply with the single word: ok"}],
+                    role="llm-probe")
+            except Exception:
+                pass    # still down — stay gated, probe again next sweep
+        if self.llm_gated and self.llm.consecutive_failures < LLM_DEGRADED_AFTER:
+            self.llm_gated = False
+            log.warning("LLM backend recovered — dispatch resumed")
+            self.audit.record("llm_gate_lifted")
+            await self.notifier.notify(
+                "llm_recovered",
+                f"✅ {self.settings.jira_project} LLM backend recovered — "
+                f"dispatch resumed")
 
     async def resume(self, by: str = "operator") -> None:
         self.paused = False
@@ -245,6 +290,7 @@ class Orchestrator:
 
     async def sweep(self) -> None:
         await self._enforce_token_budget()
+        await self._check_llm_gate()
         self._gc_running()
         statuses = ", ".join(f'"{s}"' for s in self.settings.agent_statuses)
         issues = await self.jira.search(
@@ -335,8 +381,8 @@ class Orchestrator:
     # -- per-ticket dispatch ------------------------------------------------
 
     async def _evaluate_ticket(self, issue: dict) -> None:
-        if self.paused:
-            return  # global pause: dispatch nothing, take no side effects (drain)
+        if self.paused or self.llm_gated:
+            return  # pause / LLM outage: dispatch nothing, take no side effects
         key = issue["key"]
         fields = issue.get("fields", {})
         status = (fields.get("status") or {}).get("name", "")
@@ -423,8 +469,8 @@ class Orchestrator:
     # -- queue roles ----------------------------------------------------------
 
     async def _evaluate_queues(self, issues: list[dict]) -> None:
-        if self.paused:
-            return  # global pause: no queue-role singletons while frozen
+        if self.paused or self.llm_gated:
+            return  # pause / LLM outage: no queue-role singletons while frozen
         by_status: dict[str, list[dict]] = {}
         for issue in issues:
             status = ((issue.get("fields") or {}).get("status") or {}).get("name", "")
@@ -540,8 +586,11 @@ class Orchestrator:
                 return
             try:
                 # The webhook fast-path dispatches between sweeps, so it must
-                # respect a budget blown mid-window too.
+                # respect a budget blown — or an LLM outage that developed —
+                # mid-window too, or it keeps burning retry budgets until the
+                # next sweep notices.
                 await self._enforce_token_budget()
+                await self._check_llm_gate()
                 async with self._lock:
                     self._gc_running()
                     for key in keys:

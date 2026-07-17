@@ -165,6 +165,13 @@ Jira webhooks ─┐                          ┌─> AgentRunner._loop (LLM too
    `SENTINEL_LLM_DAILY_TOKEN_BUDGET` (> 0), the pipeline pauses (`by="token-budget"`),
    `token_budget_pauses_total` increments, and resume is manual (`POST /resume`) — a blown
    budget signals a runaway, so midnight does not silently restart dispatch.
+   A separate **automatic LLM outage gate** (`_check_llm_gate`, run each sweep) suspends
+   dispatch when `llm.consecutive_failures >= DEGRADED_AFTER` (3, defined in `llm.py`) —
+   dispatching into a dead backend only burns retry budgets and floods `needs-human` —
+   then **probes once per sweep** (`role="llm-probe"`) and lifts itself when a probe
+   succeeds (a gated pipeline makes no LLM calls of its own, so without the probe nothing
+   would ever reset the counter). Alerts `llm_outage`/`llm_recovered`; gauge `llm_gated` +
+   counter `llm_gate_engagements_total`; `llm.gated` in `/health`.
    Each sweep also runs `_remind_stale_escalations`: any ticket left `needs-human`/
    `handoff-invalid` and untouched beyond `SENTINEL_STALE_ESCALATION_HOURS` (24 h) is
    re-alerted via the Notifier, deduped to one reminder per window via `sentinel.reminded`.

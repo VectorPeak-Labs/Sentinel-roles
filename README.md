@@ -79,6 +79,14 @@ a blown budget means something ran away (a rework loop, a chatty prompt), not th
 fixes it. `0` (default) disables. Watch it via `sentinel_llm_tokens_today` /
 `sentinel_llm_daily_token_budget` on `/metrics` or the `llm` block of `/health`.
 
+A third, fully **automatic** breaker covers LLM outages: after 3 consecutive failed LLM
+calls the Orchestrator stops dispatching (each dispatch would just crash on its first chat
+call, burn the ticket's retry budget and flood the board with spurious `needs-human`),
+fires an `llm_outage` alert, and **probes the backend once per sweep** — the moment a probe
+succeeds the gate lifts itself and an `llm_recovered` alert fires. No operator action
+needed for transient outages; `/health` shows `llm.gated` and `/metrics` exposes
+`sentinel_llm_gated` + `sentinel_llm_gate_engagements_total`.
+
 ## How it works
 
 ```

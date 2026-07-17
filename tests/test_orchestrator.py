@@ -464,7 +464,8 @@ def test_token_budget_pauses_pipeline(settings, tmp_path):
     orch.settings.data_dir = tmp_path
     orch.notifier = RecordingNotifier()
     orch.settings.llm_daily_token_budget = 1000
-    orch.llm = SimpleNamespace(tokens_in_current_window=lambda: 1200)   # budget blown
+    orch.llm = SimpleNamespace(tokens_in_current_window=lambda: 1200,
+                               consecutive_failures=0)      # budget blown
 
     run(orch.sweep())
     assert orch.paused is True
@@ -485,7 +486,8 @@ def test_token_budget_disabled_by_default(settings, tmp_path):
     jira = FakeJira()
     orch = make_orchestrator(settings, jira, tmp_path)
     orch.notifier = RecordingNotifier()
-    orch.llm = SimpleNamespace(tokens_in_current_window=lambda: 10**9)  # huge spend, no budget
+    orch.llm = SimpleNamespace(tokens_in_current_window=lambda: 10**9,
+                               consecutive_failures=0)      # huge spend, no budget
     assert orch.settings.llm_daily_token_budget == 0
     run(orch.sweep())
     assert orch.paused is False
@@ -496,7 +498,8 @@ def test_token_budget_under_limit_keeps_dispatching(settings, tmp_path):
     jira = FakeJira()
     orch = make_orchestrator(settings, jira, tmp_path)
     orch.settings.llm_daily_token_budget = 1000
-    orch.llm = SimpleNamespace(tokens_in_current_window=lambda: 999)
+    orch.llm = SimpleNamespace(tokens_in_current_window=lambda: 999,
+                               consecutive_failures=0)
     run(orch.sweep())
     assert orch.paused is False
     run(orch._evaluate_ticket(issue("SENT-1", "Business Requirements")))
@@ -537,3 +540,100 @@ def test_token_budget_resume_after_midnight_sticks(settings, tmp_path, monkeypat
     run(orch.sweep())
     assert orch.paused is True
     assert orch.metrics.snapshot()["token_budget_pauses_total"] == 2
+
+
+class OutageFakeLLM:
+    """Simulates a failing LiteLLM backend: probes fail until recover_on_probe
+    is set, at which point a probe succeeds and resets the failure counter
+    (mirroring the real LLM.chat behavior)."""
+    def __init__(self, failures):
+        self.consecutive_failures = failures
+        self.last_error = "APIConnectionError"
+        self.probes = 0
+        self.recover_on_probe = False
+
+    async def chat(self, messages, tools=None, model=None, temperature=None,
+                   role=None):
+        self.probes += 1
+        if self.recover_on_probe:
+            self.consecutive_failures = 0
+            return SimpleNamespace(content="ok")
+        self.consecutive_failures += 1
+        raise RuntimeError("down")
+
+
+def test_llm_gate_suspends_dispatch_during_outage(settings, tmp_path):
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    orch.notifier = RecordingNotifier()
+    orch.llm = OutageFakeLLM(failures=3)
+
+    run(orch.sweep())
+    assert orch.llm_gated is True
+    assert orch.llm.probes == 1                                  # probed for recovery
+    assert orch.notifier.events == [("llm_outage", None)]
+    assert orch.metrics.snapshot()["llm_gate_engagements_total"] == 1
+
+    run(orch._evaluate_ticket(issue("SENT-1", "Business Requirements")))
+    assert orch.runner.runs == []                                # dispatch suppressed
+
+    run(orch.sweep())                                            # still down
+    assert orch.notifier.events == [("llm_outage", None)]        # no alert storm
+    assert orch.llm.probes == 2                                  # keeps probing
+
+
+def test_llm_gate_lifts_itself_when_probe_succeeds(settings, tmp_path):
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    orch.notifier = RecordingNotifier()
+    orch.llm = OutageFakeLLM(failures=3)
+
+    run(orch.sweep())
+    assert orch.llm_gated is True
+
+    orch.llm.recover_on_probe = True                             # backend comes back
+    run(orch.sweep())
+    assert orch.llm_gated is False
+    assert orch.notifier.events == [("llm_outage", None), ("llm_recovered", None)]
+
+    run(orch._evaluate_ticket(issue("SENT-1", "Business Requirements")))
+    assert orch.runner.runs == [("03-business-analyst", "SENT-1")]   # dispatch resumed
+
+
+def test_llm_gate_not_engaged_below_threshold(settings, tmp_path):
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    orch.notifier = RecordingNotifier()
+    orch.llm = OutageFakeLLM(failures=2)                         # under the threshold
+
+    run(orch.sweep())
+    assert orch.llm_gated is False
+    assert orch.llm.probes == 0                                  # healthy: no probe calls
+    assert orch.notifier.events == []
+    run(orch._evaluate_ticket(issue("SENT-1", "Business Requirements")))
+    assert orch.runner.runs == [("03-business-analyst", "SENT-1")]
+
+
+def test_llm_gate_covers_webhook_fast_path(settings, tmp_path):
+    """Regression: an outage that develops BETWEEN sweeps (e.g. from failed
+    webhook-triggered runs) must gate the webhook fast-path too, not keep
+    dispatching into the outage until the next scheduled sweep."""
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    orch.notifier = RecordingNotifier()
+    orch.webhook_debounce_seconds = 0
+    orch.llm = OutageFakeLLM(failures=3)
+    jira.issues["SENT-1"] = issue("SENT-1", "Business Requirements")
+
+    orch._pending_keys.add("SENT-1")
+    run(orch._flush_pending())
+    assert orch.llm_gated is True                        # gate engaged by the flush
+    assert orch.llm.probes == 1                          # probing started
+    assert orch.notifier.events == [("llm_outage", None)]
+    assert orch.runner.runs == []                        # no dispatch into the outage
+
+    orch.llm.recover_on_probe = True                     # backend recovers
+    orch._pending_keys.add("SENT-1")
+    run(orch._flush_pending())
+    assert orch.llm_gated is False                       # flush probe lifted the gate
+    assert ("llm_recovered", None) in orch.notifier.events

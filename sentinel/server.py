@@ -19,7 +19,7 @@ from . import __version__
 from .audit import AuditLog
 from .config import load_settings
 from .jira import JiraClient
-from .llm import LLM
+from .llm import DEGRADED_AFTER as llm_degraded_after, LLM
 from .metrics import Metrics, render as render_metrics
 from .notify import Notifier
 from .orchestrator import Orchestrator
@@ -55,10 +55,8 @@ async def lifespan(app: FastAPI):
         await notifier.close()
 
 
-# After this many consecutive failed LLM calls, the LiteLLM backend is treated as
-# down and /health reports 'degraded' (each failure already survived the client's
-# internal retries, so a run of them is a real outage, not a transient blip).
-LLM_DEGRADED_AFTER = 3
+# Threshold shared with the orchestrator's LLM outage gate (sentinel.llm).
+LLM_DEGRADED_AFTER = llm_degraded_after
 
 app = FastAPI(title="Sentinel", version=__version__, lifespan=lifespan)
 
@@ -137,6 +135,7 @@ async def health() -> dict:
         "pending_webhook_evaluations": len(orchestrator._pending_keys),
         "llm": {
             "ok": llm_ok,
+            "gated": orchestrator.llm_gated,
             "consecutive_failures": llm.consecutive_failures,
             "last_error": llm.last_error,
             "last_ok_at": llm.last_ok_at,
@@ -177,6 +176,9 @@ async def prometheus_metrics() -> str:
                    int(llm.consecutive_failures < LLM_DEGRADED_AFTER)),
         "llm_consecutive_failures":
             ("Consecutive failed LLM calls since the last success.", llm.consecutive_failures),
+        "llm_gated":
+            ("1 while dispatch is suspended by the LLM outage gate.",
+             int(orchestrator.llm_gated)),
         "llm_tokens_today":
             ("Tokens consumed in the current UTC day (budget window).",
              llm.tokens_in_current_window()),
