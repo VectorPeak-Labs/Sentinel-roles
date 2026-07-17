@@ -88,3 +88,20 @@ def test_require_auth_dependency_raises_403_on_bad_token():
                                             authorization=None)) is None
     finally:
         srv.settings.webhook_secret = original
+
+
+def test_health_reports_degraded_when_llm_failing():
+    srv.orchestrator.agent_user = "bot"          # past 'starting'
+    srv.orchestrator.paused = False
+    srv.orchestrator.consecutive_sweep_failures = 0
+    srv.llm.consecutive_failures = 0
+    healthy = asyncio.run(srv.health())
+    assert healthy["status"] == "ok"
+    assert healthy["llm"]["ok"] is True
+
+    srv.llm.consecutive_failures = srv.LLM_DEGRADED_AFTER   # backend down
+    degraded = asyncio.run(srv.health())
+    assert degraded["status"] == "degraded"
+    assert degraded["llm"]["ok"] is False
+    assert degraded["llm"]["consecutive_failures"] == srv.LLM_DEGRADED_AFTER
+    srv.llm.consecutive_failures = 0             # restore for other tests

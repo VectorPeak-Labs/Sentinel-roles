@@ -55,6 +55,11 @@ async def lifespan(app: FastAPI):
         await notifier.close()
 
 
+# After this many consecutive failed LLM calls, the LiteLLM backend is treated as
+# down and /health reports 'degraded' (each failure already survived the client's
+# internal retries, so a run of them is a real outage, not a transient blip).
+LLM_DEGRADED_AFTER = 3
+
 app = FastAPI(title="Sentinel", version=__version__, lifespan=lifespan)
 
 if not settings.webhook_secret:
@@ -107,12 +112,15 @@ def _spawn_background(coro) -> None:
 
 @app.get("/health")
 async def health() -> dict:
+    llm_ok = llm.consecutive_failures < LLM_DEGRADED_AFTER
     if not orchestrator.agent_user:
         status = "starting"
     elif orchestrator.paused:
         status = "paused"     # operator freeze — no new dispatch until /resume
-    elif orchestrator.consecutive_sweep_failures >= 2:
-        status = "degraded"   # Jira unreachable / PAT expired — dispatching is halted
+    elif orchestrator.consecutive_sweep_failures >= 2 or not llm_ok:
+        # Jira unreachable / PAT expired, or the LiteLLM backend is failing — either
+        # way agents can't make progress and every dispatch just escalates.
+        status = "degraded"
     else:
         status = "ok"
     return {
@@ -127,6 +135,12 @@ async def health() -> dict:
         "consecutive_sweep_failures": orchestrator.consecutive_sweep_failures,
         "sweep_count": orchestrator.sweep_count,
         "pending_webhook_evaluations": len(orchestrator._pending_keys),
+        "llm": {
+            "ok": llm_ok,
+            "consecutive_failures": llm.consecutive_failures,
+            "last_error": llm.last_error,
+            "last_ok_at": llm.last_ok_at,
+        },
         "running_agents": [
             {"role": role_id, "ticket": ticket}
             for (role_id, ticket) in orchestrator.running
@@ -156,6 +170,11 @@ async def prometheus_metrics() -> str:
             ("Tickets frozen awaiting a human (needs-human).", board["needs_human"]),
         "handoff_invalid_tickets":
             ("Tickets flagged handoff-invalid.", board["handoff_invalid"]),
+        # LiteLLM backend health (passive: updated by real agent/doctor calls).
+        "llm_up": ("1 when recent LLM calls are succeeding.",
+                   int(llm.consecutive_failures < LLM_DEGRADED_AFTER)),
+        "llm_consecutive_failures":
+            ("Consecutive failed LLM calls since the last success.", llm.consecutive_failures),
     }
     labeled = {
         "tickets_in_status": (

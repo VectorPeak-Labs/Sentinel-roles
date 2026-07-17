@@ -49,7 +49,7 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   ├── payloads.py            # agent_handoff / rework YAML schema validators + comment extraction
 │   ├── jira.py                # async Jira Server/DC client (httpx); issue-property state keys; attachment up/download; retry/backoff on transient errors
 │   ├── lease.py               # LeaseManager: claim / heartbeat / release / reclaim protocol
-│   ├── llm.py                 # thin AsyncOpenAI wrapper pointed at LiteLLM
+│   ├── llm.py                 # thin AsyncOpenAI wrapper pointed at LiteLLM; tracks call health for /health
 │   ├── notify.py              # outbound alert channel: POST escalations/pause to a webhook (Slack-compatible)
 │   ├── metrics.py             # Prometheus counters + labeled-gauge exposition (served at GET /metrics)
 │   ├── config.py              # env settings + config/pipeline.yml loader (RoleConfig, Settings)
@@ -77,6 +77,7 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   └── test_audit.py          # audit rotation: size trigger, retention cap, no recent-record loss, disabled mode
 │   └── test_server_auth.py    # control-plane auth: header/bearer/query, constant-time, wrong/missing 403, open mode
 │   └── test_metrics.py        # metrics: counter inc/snapshot, Prometheus exposition shape, gauges
+│   └── test_llm.py            # LLM health tracking: consecutive_failures/last_error/last_ok_at + last_error sanitization
 ├── conftest.py                # inserts repo root into sys.path (bare `pytest` support)
 ├── Dockerfile                 # python:3.12-slim + git/curl (for shell roles); entrypoint serve|doctor
 ├── docker-compose.yml         # sentinel service (port 8080, docs+config mounted ro, /data volume) + doctor profile
@@ -119,12 +120,20 @@ Jira webhooks ─┐                          ┌─> AgentRunner._loop (LLM too
 1. **`server.py`** loads settings at import, builds `JiraClient`, `LLM`, `AuditLog`,
    `Notifier`, `Orchestrator`; the FastAPI lifespan starts `orchestrator.run_forever()` as a background
    task. Endpoints: `GET /health` (status: starting/paused/ok/degraded — degraded after ≥2
-   consecutive sweep failures, paused while the operator kill-switch is engaged),
+   consecutive sweep failures **or** ≥3 consecutive LiteLLM failures, paused while the
+   operator kill-switch is engaged),
    `GET /metrics` (Prometheus counters incremented at dispatch/escalation/reclaim/
    sweep-failure/transition sites + process gauges + board-backlog gauges — per-status
    queue depth and needs-human/handoff-invalid counts snapshotted each sweep into
    `orchestrator.board_state` — unauthenticated like `/health`),
-   `POST /webhook/jira`, `POST /sweep`, `POST /pause?reason=…`, `POST /resume`. The four
+   `POST /webhook/jira`, `POST /sweep`, `POST /pause?reason=…`, `POST /resume`.
+   `/health` also reports LiteLLM backend health (`llm.consecutive_failures`, tracked
+   passively by `LLM.chat`) and flips to `degraded` after 3 consecutive LLM failures — so a
+   dead LLM backend surfaces instead of reading `ok` while every agent run escalates.
+   `llm.last_error` is **sanitized** (`_safe_error`: exception type + HTTP status only, never
+   the message — which can carry prompts or API-key-bearing headers) since `/health` and
+   `/metrics` are unauthenticated; the warning log uses the same sanitized label (never the
+   raw exception, which would leak the same content into shared log stores). The four
    mutating endpoints share one guard (`require_auth` → `_authorized`): the `WEBHOOK_SECRET`
    presented as an `X-Sentinel-Token`/`Authorization: Bearer` header or `?token=` query
    param, compared **constant-time** (`hmac.compare_digest`); unset secret = open + a
