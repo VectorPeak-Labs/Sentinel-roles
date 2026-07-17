@@ -72,6 +72,7 @@ class Settings:
     log_level: str
 
     llm_daily_token_budget: int = 0
+    workspace_max_bytes: int = 0
     rework_limit: int = 2
     split_threshold_points: int = 8
     labels: dict[str, str] = field(default_factory=dict)
@@ -126,6 +127,7 @@ def load_settings(config_path: str | os.PathLike | None = None) -> Settings:
         shutdown_grace_seconds=float(os.environ.get("SENTINEL_SHUTDOWN_GRACE", "10")),
         stale_escalation_hours=float(os.environ.get("SENTINEL_STALE_ESCALATION_HOURS", "24")),
         llm_daily_token_budget=int(os.environ.get("SENTINEL_LLM_DAILY_TOKEN_BUDGET", "0")),
+        workspace_max_bytes=int(os.environ.get("SENTINEL_WORKSPACE_MAX_BYTES", "0")),
         log_level=os.environ.get("SENTINEL_LOG_LEVEL", "INFO"),
     )
 

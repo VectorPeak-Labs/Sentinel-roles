@@ -175,6 +175,11 @@ Jira webhooks ─┐                          ┌─> AgentRunner._loop (LLM too
    Each sweep also runs `_remind_stale_escalations`: any ticket left `needs-human`/
    `handoff-invalid` and untouched beyond `SENTINEL_STALE_ESCALATION_HOURS` (24 h) is
    re-alerted via the Notifier, deduped to one reminder per window via `sentinel.reminded`.
+   Sweep housekeeping also enforces the **workspace quota** (`_enforce_workspace_quota`):
+   an idle shell-role workspace over `SENTINEL_WORKSPACE_MAX_BYTES` (> 0) is wiped —
+   sized off the loop without the lock, deleted under the dispatch lock, never while that
+   role has a running agent; audited as `workspace_wiped`, counted in
+   `workspace_wipes_total`. Project commands must tolerate a fresh workspace.
    `_on_status_change` (ORC-5): an **agent** transition without a matching valid
    `agent_handoff` in the last 10 comments ⇒ label `handoff-invalid` + escalate (never
    reverted); a **human** transition is logged and honored (universal rule 6); a clean
@@ -291,6 +296,8 @@ Optional: `SENTINEL_DEFAULT_MODEL` (default `gpt-4o`), `SENTINEL_REVIEWER_MODEL`
 `SENTINEL_JIRA_MAX_RETRIES` (3), `SENTINEL_AUDIT_MAX_BYTES` (50 MB; 0 = unbounded),
 `SENTINEL_AUDIT_BACKUP_COUNT` (5), `SENTINEL_SHUTDOWN_GRACE` (10),
 `SENTINEL_STALE_ESCALATION_HOURS` (24; 0 = disabled),
+`SENTINEL_WORKSPACE_MAX_BYTES` (0 = disabled; > 0 wipes idle shell-role workspaces past
+this size each sweep),
 `SENTINEL_LLM_DAILY_TOKEN_BUDGET` (0 = disabled; > 0 pauses the pipeline when a UTC day's
 LLM tokens cross it), `SENTINEL_LOG_LEVEL`.
 
