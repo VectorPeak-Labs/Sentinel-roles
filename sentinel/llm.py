@@ -11,6 +11,12 @@ from openai import AsyncOpenAI
 log = logging.getLogger("sentinel.llm")
 
 
+def _utc_today() -> str:
+    """Current UTC date — the daily token-budget window (own function so tests
+    can roll the day over)."""
+    return datetime.now(timezone.utc).date().isoformat()
+
+
 def _safe_error(e: Exception) -> str:
     """Sanitized error label for the health signal. Exception messages can carry
     request/response bodies (prompts, API keys in headers), and last_error is
@@ -36,6 +42,22 @@ class LLM:
         # action is a billed LLM call; without this a runaway loop burns budget
         # invisibly. Only touched from the event loop — no lock needed.
         self.usage_totals: dict[tuple[str, str], dict[str, int]] = {}
+        # Rolling one-UTC-day token total, feeding the orchestrator's daily
+        # budget circuit breaker (SENTINEL_LLM_DAILY_TOKEN_BUDGET).
+        self.tokens_today = 0
+        self._usage_day: str | None = None
+
+    def tokens_in_current_window(self) -> int:
+        """`tokens_today`, rolling the window to the current UTC day first.
+        Reads must roll the window too: budget enforcement runs while the
+        pipeline is paused (no new calls happen to reset the counter), so a
+        read-side rollover is what lets a resume after midnight stick instead
+        of yesterday's exhausted count instantly re-tripping the breaker."""
+        today = _utc_today()
+        if today != self._usage_day:
+            self._usage_day = today
+            self.tokens_today = 0
+        return self.tokens_today
 
     def _record_usage(self, role: str | None, model: str, usage) -> None:
         key = (role or "unattributed", model)
@@ -43,8 +65,11 @@ class LLM:
             key, {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0})
         totals["calls"] += 1
         # Some OpenAI-compatible backends omit usage; count the call regardless.
-        totals["prompt_tokens"] += getattr(usage, "prompt_tokens", 0) or 0
-        totals["completion_tokens"] += getattr(usage, "completion_tokens", 0) or 0
+        prompt = getattr(usage, "prompt_tokens", 0) or 0
+        completion = getattr(usage, "completion_tokens", 0) or 0
+        totals["prompt_tokens"] += prompt
+        totals["completion_tokens"] += completion
+        self.tokens_today = self.tokens_in_current_window() + prompt + completion
 
     def usage_snapshot(self) -> list[tuple[dict[str, str], dict[str, int]]]:
         """[(labels, totals), ...] for the /metrics exposition, in stable order."""

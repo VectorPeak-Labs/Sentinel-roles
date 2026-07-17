@@ -71,6 +71,14 @@ running **drain to completion** rather than being killed mid-transition. The pau
 persisted to `DATA_DIR/pause.json`, so a container restart during an incident stays frozen
 until you explicitly `/resume`. `GET /health` reports `"status": "paused"` with the reason.
 
+The pause also backs a **daily LLM token budget** (circuit breaker for cost): set
+`SENTINEL_LLM_DAILY_TOKEN_BUDGET` and the Orchestrator pauses the pipeline the moment a UTC
+day's total token consumption crosses it (checked every sweep **and** on the webhook
+fast-path), with a `pipeline_paused` alert naming the spend. Resume is deliberately manual —
+a blown budget means something ran away (a rework loop, a chatty prompt), not that midnight
+fixes it. `0` (default) disables. Watch it via `sentinel_llm_tokens_today` /
+`sentinel_llm_daily_token_budget` on `/metrics` or the `llm` block of `/health`.
+
 ## How it works
 
 ```
