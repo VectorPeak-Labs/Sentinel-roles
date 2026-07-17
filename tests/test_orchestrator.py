@@ -637,3 +637,51 @@ def test_llm_gate_covers_webhook_fast_path(settings, tmp_path):
     run(orch._flush_pending())
     assert orch.llm_gated is False                       # flush probe lifted the gate
     assert ("llm_recovered", None) in orch.notifier.events
+
+
+def _fill_workspace(base, role_id, nbytes):
+    d = base / "workspace" / role_id
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "clone.bin").write_bytes(b"x" * nbytes)
+    return d
+
+
+def test_workspace_quota_wipes_oversized_idle_workspace(settings, tmp_path):
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    orch.settings.data_dir = tmp_path
+    orch.settings.workspace_max_bytes = 100
+    big = _fill_workspace(tmp_path, "07-implementer", 500)       # over the cap
+    small = _fill_workspace(tmp_path, "08-code-reviewer", 50)    # under the cap
+
+    run(orch.sweep())
+    assert not big.exists()                                      # wiped
+    assert small.exists()                                        # untouched
+    assert orch.metrics.snapshot()["workspace_wipes_total"] == 1
+
+
+def test_workspace_quota_spares_running_roles(settings, tmp_path):
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    orch.settings.data_dir = tmp_path
+    orch.settings.workspace_max_bytes = 100
+    big = _fill_workspace(tmp_path, "07-implementer", 500)
+
+    async def main():
+        t = asyncio.create_task(asyncio.sleep(3600))
+        orch.running[("07-implementer", "SENT-1")] = (t, "In Progress")
+        await orch.sweep()
+        t.cancel()
+    asyncio.run(main())
+    assert big.exists()                                          # agent running: spared
+    assert orch.metrics.snapshot()["workspace_wipes_total"] == 0
+
+
+def test_workspace_quota_disabled_by_default(settings, tmp_path):
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    orch.settings.data_dir = tmp_path
+    big = _fill_workspace(tmp_path, "07-implementer", 500)
+    assert orch.settings.workspace_max_bytes == 0
+    run(orch.sweep())
+    assert big.exists()                                          # quota off: untouched

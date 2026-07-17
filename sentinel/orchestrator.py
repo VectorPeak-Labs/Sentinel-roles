@@ -11,8 +11,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shutil
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from .agent import AgentRunner
 from .audit import AuditLog
@@ -26,6 +28,20 @@ from .notify import Notifier
 from .payloads import find_payload, validate_handoff
 
 log = logging.getLogger("sentinel.orchestrator")
+
+
+def _dir_size_bytes(path: Path) -> int:
+    """Total size of regular files under `path` (symlinks skipped: a workspace
+    symlink must not let files outside the tree count against — or protect —
+    the quota)."""
+    total = 0
+    for p in path.rglob("*"):
+        try:
+            if p.is_file() and not p.is_symlink():
+                total += p.stat().st_size
+        except OSError:
+            continue        # file vanished mid-walk (agent activity) — skip
+    return total
 
 
 def _parse_ts(value: str | None) -> datetime | None:
@@ -313,6 +329,52 @@ class Orchestrator:
             await self._remind_stale_escalations(issues)
         except Exception:
             log.exception("stale-escalation scan failed")
+        # Housekeeping: keep shell-role workspaces from filling the /data volume.
+        try:
+            await self._enforce_workspace_quota()
+        except Exception:
+            log.exception("workspace quota scan failed")
+
+    async def _enforce_workspace_quota(self) -> None:
+        """Wipe idle role workspaces that outgrew SENTINEL_WORKSPACE_MAX_BYTES.
+
+        Shell roles clone repos and run builds in persistent per-role dirs on
+        the same fixed /data volume as the audit log and pause state; left
+        unbounded they eventually fill it and break every write path at once
+        (the audit log is size-rotated for the same reason). Wiping is safe by
+        contract — project commands must tolerate a fresh workspace (first run
+        of a container starts empty) — but only ever touches roles with **no
+        agent currently running**, and the deletion itself happens under the
+        dispatch lock so no agent can start into a half-deleted tree."""
+        cap = self.settings.workspace_max_bytes
+        if cap <= 0:
+            return
+        base = self.settings.data_dir / "workspace"
+        if not base.exists():
+            return
+        # Size the trees off the event loop and without the lock (walking a
+        # multi-GB clone can take a while); re-check "running" under the lock.
+        def scan() -> list[tuple[str, int]]:
+            out = []
+            for role_dir in sorted(base.iterdir()):
+                if role_dir.is_dir():
+                    size = _dir_size_bytes(role_dir)
+                    if size > cap:
+                        out.append((role_dir.name, size))
+            return out
+        oversized = await asyncio.to_thread(scan)
+        if not oversized:
+            return
+        async with self._lock:
+            running_roles = {role_id for (role_id, _t) in self.running}
+            for role_id, size in oversized:
+                if role_id in running_roles:
+                    continue        # never yank a workspace out from under an agent
+                await asyncio.to_thread(shutil.rmtree, base / role_id, True)
+                log.warning("workspace %s exceeded quota (%d > %d bytes) — wiped",
+                            role_id, size, cap)
+                self.metrics.inc("workspace_wipes_total")
+                self.audit.record("workspace_wiped", role=role_id, bytes=size)
 
     async def _remind_stale_escalations(self, issues: list[dict]) -> None:
         """Escalation alerts fire once when a ticket freezes; if a human never

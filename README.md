@@ -130,7 +130,13 @@ Jira webhooks ─┐                       ┌─> role agent (LLM tool loop ove
 ### What you must fill in per project
 
 The shell-enabled roles (Implementer 07, Reviewer 08, Deploy 09, QA 10, Release 12) run
-real commands in a persistent workspace. Until you fill in the `commands:` section of
+real commands in a persistent workspace. These workspaces live on the fixed `/data` volume
+(next to the audit log and pause state), so set `SENTINEL_WORKSPACE_MAX_BYTES` to keep them
+from ever filling it: each sweep, any **idle** role workspace over the cap is wiped (roles
+with a running agent are never touched, and project commands must tolerate a fresh
+workspace — clone-if-missing — exactly as they must on a new container). `0` (default)
+disables; wipes are audited (`workspace_wiped`) and counted (`sentinel_workspace_wipes_total`).
+Until you fill in the `commands:` section of
 `config/pipeline.yml` (repo clone, test suite, deploy scripts), those agents will escalate
 with `needs-human` when they need them — by design, they never guess at deploy commands.
 
