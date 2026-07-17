@@ -612,3 +612,28 @@ def test_llm_gate_not_engaged_below_threshold(settings, tmp_path):
     assert orch.notifier.events == []
     run(orch._evaluate_ticket(issue("SENT-1", "Business Requirements")))
     assert orch.runner.runs == [("03-business-analyst", "SENT-1")]
+
+
+def test_llm_gate_covers_webhook_fast_path(settings, tmp_path):
+    """Regression: an outage that develops BETWEEN sweeps (e.g. from failed
+    webhook-triggered runs) must gate the webhook fast-path too, not keep
+    dispatching into the outage until the next scheduled sweep."""
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    orch.notifier = RecordingNotifier()
+    orch.webhook_debounce_seconds = 0
+    orch.llm = OutageFakeLLM(failures=3)
+    jira.issues["SENT-1"] = issue("SENT-1", "Business Requirements")
+
+    orch._pending_keys.add("SENT-1")
+    run(orch._flush_pending())
+    assert orch.llm_gated is True                        # gate engaged by the flush
+    assert orch.llm.probes == 1                          # probing started
+    assert orch.notifier.events == [("llm_outage", None)]
+    assert orch.runner.runs == []                        # no dispatch into the outage
+
+    orch.llm.recover_on_probe = True                     # backend recovers
+    orch._pending_keys.add("SENT-1")
+    run(orch._flush_pending())
+    assert orch.llm_gated is False                       # flush probe lifted the gate
+    assert ("llm_recovered", None) in orch.notifier.events

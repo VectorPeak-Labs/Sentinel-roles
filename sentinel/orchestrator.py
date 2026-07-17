@@ -586,8 +586,11 @@ class Orchestrator:
                 return
             try:
                 # The webhook fast-path dispatches between sweeps, so it must
-                # respect a budget blown mid-window too.
+                # respect a budget blown — or an LLM outage that developed —
+                # mid-window too, or it keeps burning retry budgets until the
+                # next sweep notices.
                 await self._enforce_token_budget()
+                await self._check_llm_gate()
                 async with self._lock:
                     self._gc_running()
                     for key in keys:
