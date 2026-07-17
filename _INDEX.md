@@ -39,6 +39,7 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 ```
 ├── README.md                  # top-level: quick start, Jira prerequisites, human levers, endpoints
 ├── _INDEX.md                  # this file
+├── .claude/skills/pr-autopilot/SKILL.md   # dev tooling: sets up the scheduled PR-feedback/feature Routine (not part of the Sentinel runtime)
 ├── sentinel/                  # the Python package (~1.9k lines, Python 3.12, asyncio)
 │   ├── __init__.py            # docstring + __version__ ("0.1.0")
 │   ├── server.py              # FastAPI app: /health, /webhook/jira, /sweep; starts the orchestrator loop
