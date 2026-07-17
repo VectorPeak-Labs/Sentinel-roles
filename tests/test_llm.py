@@ -13,8 +13,9 @@ from sentinel.llm import LLM
 
 
 class FakeCompletions:
-    """Replays a behavior list: an Exception raises, anything else returns a
-    normal chat-completion message."""
+    """Replays a behavior list: an Exception raises, a (prompt, completion)
+    tuple returns a message with that token usage, anything else returns a
+    normal chat-completion message without a usage block (some backends omit it)."""
     def __init__(self, behavior):
         self.behavior = list(behavior)
         self.calls = 0
@@ -25,8 +26,12 @@ class FakeCompletions:
         item = self.behavior[i]
         if isinstance(item, Exception):
             raise item
-        return SimpleNamespace(
+        response = SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))])
+        if isinstance(item, tuple):
+            response.usage = SimpleNamespace(prompt_tokens=item[0],
+                                             completion_tokens=item[1])
+        return response
 
 
 def make_llm(behavior):
@@ -87,3 +92,33 @@ def test_success_after_failures_resets_the_signal():
     asyncio.run(llm.chat([{"role": "user", "content": "hi"}]))
     assert llm.consecutive_failures == 0
     assert llm.last_error is None
+
+
+def test_usage_accumulates_per_role_and_model():
+    llm = make_llm([(7, 3), (5, 2), (11, 4)])
+    msgs = [{"role": "user", "content": "hi"}]
+    asyncio.run(llm.chat(msgs, role="07-implementer"))
+    asyncio.run(llm.chat(msgs, role="07-implementer"))
+    asyncio.run(llm.chat(msgs, role="08-code-reviewer", model="gpt-5o"))
+    assert llm.usage_totals[("07-implementer", "gpt-4o")] == {
+        "calls": 2, "prompt_tokens": 12, "completion_tokens": 5}
+    assert llm.usage_totals[("08-code-reviewer", "gpt-5o")] == {
+        "calls": 1, "prompt_tokens": 11, "completion_tokens": 4}
+    # snapshot returns Prometheus-ready label dicts in stable (sorted) order
+    labels = [l for l, _ in llm.usage_snapshot()]
+    assert labels == [{"role": "07-implementer", "model": "gpt-4o"},
+                      {"role": "08-code-reviewer", "model": "gpt-5o"}]
+
+
+def test_usage_counts_calls_even_when_backend_omits_usage():
+    llm = make_llm(["ok"])   # response has no usage block
+    asyncio.run(llm.chat([{"role": "user", "content": "hi"}]))   # no role either
+    assert llm.usage_totals[("unattributed", "gpt-4o")] == {
+        "calls": 1, "prompt_tokens": 0, "completion_tokens": 0}
+
+
+def test_failed_calls_record_no_usage():
+    llm = make_llm([RuntimeError("down")])
+    with pytest.raises(RuntimeError):
+        asyncio.run(llm.chat([{"role": "user", "content": "hi"}], role="07-implementer"))
+    assert llm.usage_totals == {}

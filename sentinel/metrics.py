@@ -58,18 +58,25 @@ def _line(name: str, value, labels: str = "") -> str:
 
 
 def render(counters: dict[str, int], gauges: dict[str, tuple[str, float | int]],
-           labeled_gauges: dict[str, tuple[str, list]] | None = None) -> str:
+           labeled_gauges: dict[str, tuple[str, list]] | None = None,
+           labeled_counters: dict[str, tuple[str, list]] | None = None) -> str:
     """Prometheus text exposition.
 
-    `gauges` maps name -> (help, value). `labeled_gauges` maps
-    name -> (help, [(labels_dict, value), ...]) for multi-series gauges such as
-    per-status queue depth (`sentinel_tickets_in_status{status="In Progress"}`).
+    `gauges` maps name -> (help, value). `labeled_gauges` and `labeled_counters`
+    map name -> (help, [(labels_dict, value), ...]) for multi-series metrics such
+    as per-status queue depth (`sentinel_tickets_in_status{status="In Progress"}`)
+    or per-role token usage (`sentinel_llm_prompt_tokens_total{role=...,model=...}`).
     """
     out: list[str] = []
     for name, help_text in COUNTERS.items():
         out.append(f"# HELP sentinel_{name} {help_text}")
         out.append(f"# TYPE sentinel_{name} counter")
         out.append(_line(name, counters.get(name, 0)))
+    for name, (help_text, series) in (labeled_counters or {}).items():
+        out.append(f"# HELP sentinel_{name} {help_text}")
+        out.append(f"# TYPE sentinel_{name} counter")
+        for labels, value in series:
+            out.append(_line(name, value, _fmt_labels(labels)))
     for name, (help_text, value) in gauges.items():
         out.append(f"# HELP sentinel_{name} {help_text}")
         out.append(f"# TYPE sentinel_{name} gauge")

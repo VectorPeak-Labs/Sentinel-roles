@@ -49,7 +49,7 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   ├── payloads.py            # agent_handoff / rework YAML schema validators + comment extraction
 │   ├── jira.py                # async Jira Server/DC client (httpx); issue-property state keys; attachment up/download; retry/backoff on transient errors
 │   ├── lease.py               # LeaseManager: claim / heartbeat / release / reclaim protocol
-│   ├── llm.py                 # thin AsyncOpenAI wrapper pointed at LiteLLM; tracks call health for /health
+│   ├── llm.py                 # thin AsyncOpenAI wrapper pointed at LiteLLM; tracks call health for /health + per-role token usage for /metrics
 │   ├── notify.py              # outbound alert channel: POST escalations/pause to a webhook (Slack-compatible)
 │   ├── metrics.py             # Prometheus counters + labeled-gauge exposition (served at GET /metrics)
 │   ├── config.py              # env settings + config/pipeline.yml loader (RoleConfig, Settings)
@@ -77,7 +77,7 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   └── test_audit.py          # audit rotation: size trigger, retention cap, no recent-record loss, disabled mode
 │   └── test_server_auth.py    # control-plane auth: header/bearer/query, constant-time, wrong/missing 403, open mode
 │   └── test_metrics.py        # metrics: counter inc/snapshot, Prometheus exposition shape, gauges
-│   └── test_llm.py            # LLM health tracking: consecutive_failures/last_error/last_ok_at + last_error sanitization
+│   └── test_llm.py            # LLM health tracking: consecutive_failures/last_error/last_ok_at + last_error sanitization + per-role/model token-usage accumulation
 ├── conftest.py                # inserts repo root into sys.path (bare `pytest` support)
 ├── Dockerfile                 # python:3.12-slim + git/curl (for shell roles); entrypoint serve|doctor
 ├── docker-compose.yml         # sentinel service (port 8080, docs+config mounted ro, /data volume) + doctor profile
@@ -125,7 +125,10 @@ Jira webhooks ─┐                          ┌─> AgentRunner._loop (LLM too
    `GET /metrics` (Prometheus counters incremented at dispatch/escalation/reclaim/
    sweep-failure/transition sites + process gauges + board-backlog gauges — per-status
    queue depth and needs-human/handoff-invalid counts snapshotted each sweep into
-   `orchestrator.board_state` — unauthenticated like `/health`),
+   `orchestrator.board_state` — plus per-role/model **LLM token-usage counters**
+   (`sentinel_llm_{calls,prompt_tokens,completion_tokens}_total{role,model}`, accumulated
+   passively in `llm.usage_totals` from each successful `LLM.chat(role=…)`; in-memory, so
+   totals reset on restart — scrape with `rate()`) — unauthenticated like `/health`),
    `POST /webhook/jira`, `POST /sweep`, `POST /pause?reason=…`, `POST /resume`.
    `/health` also reports LiteLLM backend health (`llm.consecutive_failures`, tracked
    passively by `LLM.chat`) and flips to `degraded` after 3 consecutive LLM failures — so a

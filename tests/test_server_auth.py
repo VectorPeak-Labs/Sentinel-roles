@@ -105,3 +105,19 @@ def test_health_reports_degraded_when_llm_failing():
     assert degraded["llm"]["ok"] is False
     assert degraded["llm"]["consecutive_failures"] == srv.LLM_DEGRADED_AFTER
     srv.llm.consecutive_failures = 0             # restore for other tests
+
+
+def test_metrics_exposes_llm_token_usage_by_role_and_model():
+    srv.llm.usage_totals[("07-implementer", "gpt-4o")] = {
+        "calls": 2, "prompt_tokens": 12, "completion_tokens": 5}
+    try:
+        out = asyncio.run(srv.prometheus_metrics())
+        assert "# TYPE sentinel_llm_calls_total counter" in out
+        assert ('sentinel_llm_calls_total'
+                '{role="07-implementer",model="gpt-4o"} 2') in out
+        assert ('sentinel_llm_prompt_tokens_total'
+                '{role="07-implementer",model="gpt-4o"} 12') in out
+        assert ('sentinel_llm_completion_tokens_total'
+                '{role="07-implementer",model="gpt-4o"} 5') in out
+    finally:
+        srv.llm.usage_totals.clear()             # restore for other tests

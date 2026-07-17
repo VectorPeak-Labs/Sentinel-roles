@@ -113,7 +113,8 @@ class FakeLLM:
         self.default = default
         self.calls = 0
 
-    async def chat(self, messages, tools=None, model=None, temperature=None):
+    async def chat(self, messages, tools=None, model=None, temperature=None,
+                   role=None):
         self.calls += 1
         if not self.script:
             if self.default is not None:
