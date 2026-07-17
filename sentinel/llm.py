@@ -10,6 +10,12 @@ from openai import AsyncOpenAI
 
 log = logging.getLogger("sentinel.llm")
 
+# After this many consecutive failed LLM calls the backend is treated as down:
+# /health reports 'degraded' and the orchestrator gates dispatch (each failure
+# already survived the client's internal retries, so a run of them is a real
+# outage, not a transient blip). Shared by server.py and orchestrator.py.
+DEGRADED_AFTER = 3
+
 
 def _utc_today() -> str:
     """Current UTC date — the daily token-budget window (own function so tests
