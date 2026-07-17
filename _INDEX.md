@@ -53,7 +53,7 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   ├── notify.py              # outbound alert channel: POST escalations/pause to a webhook (Slack-compatible)
 │   ├── metrics.py             # Prometheus counters + labeled-gauge exposition (served at GET /metrics)
 │   ├── config.py              # env settings + config/pipeline.yml loader (RoleConfig, Settings)
-│   ├── audit.py               # append-only JSONL audit log (thread-locked); size-rotated with retention
+│   ├── audit.py               # append-only JSONL audit log (thread-locked); size-rotated with retention; queryable via GET /audit
 │   └── doctor.py              # pre-flight CLI: Jira/project/statuses/LiteLLM/role-doc checks
 ├── config/pipeline.yml        # THE dispatch table: role triggers, WIP limits, labels, models, project commands
 ├── docs/                      # role goal documents — these ARE the agents' system prompts
@@ -74,7 +74,7 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   └── test_attachments.py    # evidence channel: attach_file/get_attachment + containment
 │   └── test_notify.py         # outbound alert channel: payload shape, disabled default, error-swallowing
 │   └── test_jira_retry.py     # transient-failure retry: 429/5xx, transport errors, idempotency, give-up
-│   └── test_audit.py          # audit rotation: size trigger, retention cap, no recent-record loss, disabled mode
+│   └── test_audit.py          # audit rotation: size trigger, retention cap, no recent-record loss, disabled mode; read_records filters/generations/malformed-line handling
 │   └── test_server_auth.py    # control-plane auth: header/bearer/query, constant-time, wrong/missing 403, open mode
 │   └── test_metrics.py        # metrics: counter inc/snapshot, Prometheus exposition shape, gauges
 │   └── test_llm.py            # LLM health tracking: consecutive_failures/last_error/last_ok_at + last_error sanitization + per-role/model token-usage accumulation
@@ -129,6 +129,9 @@ Jira webhooks ─┐                          ┌─> AgentRunner._loop (LLM too
    (`sentinel_llm_{calls,prompt_tokens,completion_tokens}_total{role,model}`, accumulated
    passively in `llm.usage_totals` from each successful `LLM.chat(role=…)`; in-memory, so
    totals reset on restart — scrape with `rate()`) — unauthenticated like `/health`),
+   `GET /audit?ticket=…&event=…&limit=…` (query the audit trail: newest matching records
+   oldest-first across rotated generations via `AuditLog.read_records`; **auth required**
+   unlike `/metrics`, since records carry ticket activity and error strings),
    `POST /webhook/jira`, `POST /sweep`, `POST /pause?reason=…`, `POST /resume`.
    `/health` also reports LiteLLM backend health (`llm.consecutive_failures`, tracked
    passively by `LLM.chat`) and flips to `degraded` after 3 consecutive LLM failures — so a

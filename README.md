@@ -156,6 +156,7 @@ value to `0` to disable the reminders.
 |---|---|
 | `GET /health` | liveness + pause state + LiteLLM health + currently running agents (no auth) |
 | `GET /metrics` | Prometheus metrics: dispatch/escalation/reclaim/sweep-failure counters + live gauges (no auth) |
+| `GET /audit?ticket=…&event=…&limit=…` | query the audit trail (newest matching records, across rotated generations; auth required) |
 | `POST /webhook/jira` | Jira webhook receiver |
 | `POST /sweep` | force an immediate board sweep |
 | `POST /pause?reason=…` | freeze all dispatch (in-flight runs drain); survives restart |
