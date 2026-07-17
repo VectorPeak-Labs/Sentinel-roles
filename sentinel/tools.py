@@ -654,7 +654,7 @@ async def _run_estimators(ctx: ToolContext, args: dict) -> ToolResult:
             msg = await ctx.llm.chat(
                 [{"role": "system", "content": _ESTIMATOR_PROMPT},
                  {"role": "user", "content": prompt}],
-                model=ctx.role.model, temperature=1.0)
+                model=ctx.role.model, temperature=1.0, role=ctx.role.role_id)
             return {"estimator": i + 1, "response": (msg.content or "").strip()}
         except Exception as e:
             return {"estimator": i + 1, "error": str(e)}

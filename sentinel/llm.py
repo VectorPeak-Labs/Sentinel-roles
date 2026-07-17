@@ -32,10 +32,30 @@ class LLM:
         self.consecutive_failures = 0
         self.last_error: str | None = None
         self.last_ok_at: str | None = None
+        # Cumulative token usage per (role, model), fed to /metrics. Every agent
+        # action is a billed LLM call; without this a runaway loop burns budget
+        # invisibly. Only touched from the event loop — no lock needed.
+        self.usage_totals: dict[tuple[str, str], dict[str, int]] = {}
+
+    def _record_usage(self, role: str | None, model: str, usage) -> None:
+        key = (role or "unattributed", model)
+        totals = self.usage_totals.setdefault(
+            key, {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0})
+        totals["calls"] += 1
+        # Some OpenAI-compatible backends omit usage; count the call regardless.
+        totals["prompt_tokens"] += getattr(usage, "prompt_tokens", 0) or 0
+        totals["completion_tokens"] += getattr(usage, "completion_tokens", 0) or 0
+
+    def usage_snapshot(self) -> list[tuple[dict[str, str], dict[str, int]]]:
+        """[(labels, totals), ...] for the /metrics exposition, in stable order."""
+        return [({"role": role, "model": model}, dict(totals))
+                for (role, model), totals in sorted(self.usage_totals.items())]
 
     async def chat(self, messages: list[dict], tools: list[dict] | None = None,
-                   model: str | None = None, temperature: float | None = None):
-        """One chat-completions call; returns the first choice's message object."""
+                   model: str | None = None, temperature: float | None = None,
+                   role: str | None = None):
+        """One chat-completions call; returns the first choice's message object.
+        `role` attributes the call's token usage to a pipeline role."""
         kwargs: dict = {"model": model or self.default_model, "messages": messages}
         if tools:
             kwargs["tools"] = tools
@@ -54,6 +74,7 @@ class LLM:
         self.consecutive_failures = 0
         self.last_error = None
         self.last_ok_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        self._record_usage(role, kwargs["model"], getattr(response, "usage", None))
         return response.choices[0].message
 
     async def close(self) -> None:

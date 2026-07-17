@@ -160,9 +160,13 @@ value to `0` to disable the reminders.
 `sentinel_running_agents`, `sentinel_consecutive_sweep_failures`, `sentinel_sweeps_total`, …),
 and **board-backlog gauges** refreshed each sweep: `sentinel_tickets_in_status{status="…"}`
 (queue depth per stage), `sentinel_needs_human_tickets`, `sentinel_handoff_invalid_tickets`,
-`sentinel_agent_tickets_total`. Point a Prometheus scraper at it to alert on escalation
-spikes, sustained sweep failures, a growing Rework/To-Do backlog, or escalations left
-unresolved (`needs_human_tickets > 0` for too long).
+`sentinel_agent_tickets_total`, plus **LLM token-usage counters** labeled by pipeline role
+and model: `sentinel_llm_calls_total{role,model}`, `sentinel_llm_prompt_tokens_total{role,model}`,
+`sentinel_llm_completion_tokens_total{role,model}` (every agent action is a billed LLM call —
+these make per-role consumption and runaway loops visible; totals reset on restart, so use
+`rate()`/`increase()`). Point a Prometheus scraper at it to alert on escalation
+spikes, sustained sweep failures, a growing Rework/To-Do backlog, escalations left
+unresolved (`needs_human_tickets > 0` for too long), or an abnormal token-burn rate.
 
 The four `POST` endpoints can freeze or nudge the whole pipeline, so they require the
 `WEBHOOK_SECRET`. Present it as an `X-Sentinel-Token: <secret>` header, an

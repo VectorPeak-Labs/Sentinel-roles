@@ -181,7 +181,22 @@ async def prometheus_metrics() -> str:
             "Tickets in each agent-owned status at the last sweep.",
             [({"status": s}, n) for s, n in sorted(board["by_status"].items())]),
     }
-    return render_metrics(metrics.snapshot(), gauges, labeled)
+    # Token/cost observability: every agent action is a billed LLM call, so a
+    # runaway loop shows up here (and in a Prometheus rate() alert) instead of
+    # only on the invoice.
+    usage = llm.usage_snapshot()
+    labeled_counters = {
+        "llm_calls_total": (
+            "Chat-completion calls, by pipeline role and model.",
+            [(labels, totals["calls"]) for labels, totals in usage]),
+        "llm_prompt_tokens_total": (
+            "Prompt tokens consumed, by pipeline role and model.",
+            [(labels, totals["prompt_tokens"]) for labels, totals in usage]),
+        "llm_completion_tokens_total": (
+            "Completion tokens generated, by pipeline role and model.",
+            [(labels, totals["completion_tokens"]) for labels, totals in usage]),
+    }
+    return render_metrics(metrics.snapshot(), gauges, labeled, labeled_counters)
 
 
 @app.post("/webhook/jira")

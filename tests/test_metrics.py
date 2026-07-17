@@ -60,3 +60,16 @@ def test_label_values_are_escaped():
                  labeled_gauges={"x": ("h", [({"status": 'a"b\\c'}, 1)])})
     # both the quote and the backslash must be escaped in the exposition
     assert r'sentinel_x{status="a\"b\\c"} 1' in out
+
+
+def test_render_labeled_counters():
+    out = render(Metrics().snapshot(), gauges={},
+                 labeled_counters={"llm_prompt_tokens_total": (
+                     "per role/model",
+                     [({"role": "07-implementer", "model": "gpt-4o"}, 12),
+                      ({"role": "08-code-reviewer", "model": "gpt-5o"}, 11)])})
+    assert "# TYPE sentinel_llm_prompt_tokens_total counter" in out
+    assert ('sentinel_llm_prompt_tokens_total'
+            '{role="07-implementer",model="gpt-4o"} 12') in out
+    assert ('sentinel_llm_prompt_tokens_total'
+            '{role="08-code-reviewer",model="gpt-5o"} 11') in out
