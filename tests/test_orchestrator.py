@@ -6,6 +6,7 @@ dispatched, when a ticket is skipped, reclaimed, or escalated (ORC-1..4).
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -455,3 +456,48 @@ def test_pause_state_survives_restart(settings, tmp_path):
     # ...and resume clears the persisted state so the next restart starts clean.
     run(revived.resume(by="alice"))
     assert not (tmp_path / "pause.json").exists()
+
+
+def test_token_budget_pauses_pipeline(settings, tmp_path):
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    orch.settings.data_dir = tmp_path
+    orch.notifier = RecordingNotifier()
+    orch.settings.llm_daily_token_budget = 1000
+    orch.llm = SimpleNamespace(tokens_today=1200)          # budget blown
+
+    run(orch.sweep())
+    assert orch.paused is True
+    assert "token budget exhausted" in orch.pause_reason
+    assert orch.metrics.snapshot()["token_budget_pauses_total"] == 1
+    assert ("pipeline_paused", None) in orch.notifier.events
+
+    # further sweeps while paused do not re-trip the breaker (no alert storm)
+    run(orch.sweep())
+    assert orch.metrics.snapshot()["token_budget_pauses_total"] == 1
+
+    # dispatch stays suppressed while paused
+    run(orch._evaluate_ticket(issue("SENT-1", "Business Requirements")))
+    assert orch.runner.runs == []
+
+
+def test_token_budget_disabled_by_default(settings, tmp_path):
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    orch.notifier = RecordingNotifier()
+    orch.llm = SimpleNamespace(tokens_today=10**9)         # huge spend, no budget
+    assert orch.settings.llm_daily_token_budget == 0
+    run(orch.sweep())
+    assert orch.paused is False
+    assert orch.notifier.events == []
+
+
+def test_token_budget_under_limit_keeps_dispatching(settings, tmp_path):
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    orch.settings.llm_daily_token_budget = 1000
+    orch.llm = SimpleNamespace(tokens_today=999)
+    run(orch.sweep())
+    assert orch.paused is False
+    run(orch._evaluate_ticket(issue("SENT-1", "Business Requirements")))
+    assert orch.runner.runs == [("03-business-analyst", "SENT-1")]

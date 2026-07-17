@@ -139,6 +139,22 @@ class Orchestrator:
             + (f": {self.pause_reason}" if self.pause_reason else ""),
             by=by, reason=self.pause_reason)
 
+    async def _enforce_token_budget(self) -> None:
+        """Daily LLM token budget circuit breaker: when the day's spend crosses
+        SENTINEL_LLM_DAILY_TOKEN_BUDGET, freeze dispatch via the existing pause
+        (cordon-and-drain: in-flight runs finish, nothing new starts). Resuming
+        is a deliberate human act — POST /resume — even after the day rolls
+        over: a blown budget means something ran away, not that midnight fixes it."""
+        budget = self.settings.llm_daily_token_budget
+        if budget <= 0 or self.paused or self.llm is None:
+            return
+        spent = self.llm.tokens_today
+        if spent >= budget:
+            self.metrics.inc("token_budget_pauses_total")
+            await self.pause(
+                reason=f"daily LLM token budget exhausted ({spent} >= {budget} tokens)",
+                by="token-budget")
+
     async def resume(self, by: str = "operator") -> None:
         self.paused = False
         self.paused_at = None
@@ -226,6 +242,7 @@ class Orchestrator:
     # -- sweep -------------------------------------------------------------
 
     async def sweep(self) -> None:
+        await self._enforce_token_budget()
         self._gc_running()
         statuses = ", ".join(f'"{s}"' for s in self.settings.agent_statuses)
         issues = await self.jira.search(
@@ -520,6 +537,9 @@ class Orchestrator:
             if not keys:
                 return
             try:
+                # The webhook fast-path dispatches between sweeps, so it must
+                # respect a budget blown mid-window too.
+                await self._enforce_token_budget()
                 async with self._lock:
                     self._gc_running()
                     for key in keys:

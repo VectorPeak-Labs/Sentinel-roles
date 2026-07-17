@@ -122,3 +122,17 @@ def test_failed_calls_record_no_usage():
     with pytest.raises(RuntimeError):
         asyncio.run(llm.chat([{"role": "user", "content": "hi"}], role="07-implementer"))
     assert llm.usage_totals == {}
+
+
+def test_tokens_today_accumulates_and_resets_on_day_rollover(monkeypatch):
+    import sentinel.llm as llm_mod
+    monkeypatch.setattr(llm_mod, "_utc_today", lambda: "2026-07-17")
+    llm = make_llm([(7, 3), (5, 2), (1, 1)])
+    msgs = [{"role": "user", "content": "hi"}]
+    asyncio.run(llm.chat(msgs, role="07-implementer"))
+    asyncio.run(llm.chat(msgs, role="08-code-reviewer"))
+    assert llm.tokens_today == 17                       # 7+3 + 5+2, across roles
+
+    monkeypatch.setattr(llm_mod, "_utc_today", lambda: "2026-07-18")
+    asyncio.run(llm.chat(msgs, role="07-implementer"))  # new UTC day
+    assert llm.tokens_today == 2                        # window reset, 1+1

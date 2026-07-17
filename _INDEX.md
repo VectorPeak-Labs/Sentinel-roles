@@ -157,6 +157,11 @@ Jira webhooks ─┐                          ┌─> AgentRunner._loop (LLM too
    the top of `_evaluate_ticket`/`_evaluate_queues`: when engaged, no agent is dispatched and
    no repair side effects run; in-flight runs drain. The flag is persisted to
    `DATA_DIR/pause.json` and reloaded in `start()` so a restart mid-incident stays frozen.
+   The pause also backs the **daily token budget breaker** (`_enforce_token_budget`, run at
+   sweep start and on the webhook fast-path): when `llm.tokens_today` crosses
+   `SENTINEL_LLM_DAILY_TOKEN_BUDGET` (> 0), the pipeline pauses (`by="token-budget"`),
+   `token_budget_pauses_total` increments, and resume is manual (`POST /resume`) — a blown
+   budget signals a runaway, so midnight does not silently restart dispatch.
    Each sweep also runs `_remind_stale_escalations`: any ticket left `needs-human`/
    `handoff-invalid` and untouched beyond `SENTINEL_STALE_ESCALATION_HOURS` (24 h) is
    re-alerted via the Notifier, deduped to one reminder per window via `sentinel.reminded`.
@@ -275,7 +280,9 @@ Optional: `SENTINEL_DEFAULT_MODEL` (default `gpt-4o`), `SENTINEL_REVIEWER_MODEL`
 `SENTINEL_HEARTBEAT_INTERVAL` (600), `SENTINEL_MAX_AGENT_TURNS` (80),
 `SENTINEL_JIRA_MAX_RETRIES` (3), `SENTINEL_AUDIT_MAX_BYTES` (50 MB; 0 = unbounded),
 `SENTINEL_AUDIT_BACKUP_COUNT` (5), `SENTINEL_SHUTDOWN_GRACE` (10),
-`SENTINEL_STALE_ESCALATION_HOURS` (24; 0 = disabled), `SENTINEL_LOG_LEVEL`.
+`SENTINEL_STALE_ESCALATION_HOURS` (24; 0 = disabled),
+`SENTINEL_LLM_DAILY_TOKEN_BUDGET` (0 = disabled; > 0 pauses the pipeline when a UTC day's
+LLM tokens cross it), `SENTINEL_LOG_LEVEL`.
 
 **`config/pipeline.yml`** supports `${VAR}` / `${VAR:default}` expansion (recursive, done
 in `config._expand_env`). Defines: `rework_limit` (2), `split_threshold_points` (8),

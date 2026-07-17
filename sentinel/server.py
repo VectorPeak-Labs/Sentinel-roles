@@ -140,6 +140,8 @@ async def health() -> dict:
             "consecutive_failures": llm.consecutive_failures,
             "last_error": llm.last_error,
             "last_ok_at": llm.last_ok_at,
+            "tokens_today": llm.tokens_today,
+            "daily_token_budget": settings.llm_daily_token_budget,
         },
         "running_agents": [
             {"role": role_id, "ticket": ticket}
@@ -175,6 +177,10 @@ async def prometheus_metrics() -> str:
                    int(llm.consecutive_failures < LLM_DEGRADED_AFTER)),
         "llm_consecutive_failures":
             ("Consecutive failed LLM calls since the last success.", llm.consecutive_failures),
+        "llm_tokens_today":
+            ("Tokens consumed in the current UTC day (budget window).", llm.tokens_today),
+        "llm_daily_token_budget":
+            ("Configured daily token budget (0 = disabled).", settings.llm_daily_token_budget),
     }
     labeled = {
         "tickets_in_status": (

@@ -24,6 +24,7 @@ COUNTERS: dict[str, str] = {
     "transitions_validated_total": "Agent transitions accepted with a valid handoff payload.",
     "handoff_invalid_total": "Agent transitions rejected for a missing/invalid handoff payload.",
     "stale_escalation_reminders_total": "Reminders sent for tickets left frozen awaiting a human.",
+    "token_budget_pauses_total": "Pipeline pauses triggered by the daily LLM token budget.",
 }
 
 
