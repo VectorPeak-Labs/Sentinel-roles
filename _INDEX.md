@@ -131,7 +131,8 @@ Jira webhooks ─┐                          ┌─> AgentRunner._loop (LLM too
    dead LLM backend surfaces instead of reading `ok` while every agent run escalates.
    `llm.last_error` is **sanitized** (`_safe_error`: exception type + HTTP status only, never
    the message — which can carry prompts or API-key-bearing headers) since `/health` and
-   `/metrics` are unauthenticated; the full exception is logged at warning level instead. The four
+   `/metrics` are unauthenticated; the warning log uses the same sanitized label (never the
+   raw exception, which would leak the same content into shared log stores). The four
    mutating endpoints share one guard (`require_auth` → `_authorized`): the `WEBHOOK_SECRET`
    presented as an `X-Sentinel-Token`/`Authorization: Bearer` header or `?token=` query
    param, compared **constant-time** (`hmac.compare_digest`); unset secret = open + a
