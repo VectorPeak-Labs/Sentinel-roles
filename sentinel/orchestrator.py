@@ -148,7 +148,9 @@ class Orchestrator:
         budget = self.settings.llm_daily_token_budget
         if budget <= 0 or self.paused or self.llm is None:
             return
-        spent = self.llm.tokens_today
+        # The rolling read matters: while paused no new LLM call resets the
+        # counter, so a plain tokens_today would stay exhausted forever.
+        spent = self.llm.tokens_in_current_window()
         if spent >= budget:
             self.metrics.inc("token_budget_pauses_total")
             await self.pause(

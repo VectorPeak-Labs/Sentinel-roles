@@ -47,6 +47,18 @@ class LLM:
         self.tokens_today = 0
         self._usage_day: str | None = None
 
+    def tokens_in_current_window(self) -> int:
+        """`tokens_today`, rolling the window to the current UTC day first.
+        Reads must roll the window too: budget enforcement runs while the
+        pipeline is paused (no new calls happen to reset the counter), so a
+        read-side rollover is what lets a resume after midnight stick instead
+        of yesterday's exhausted count instantly re-tripping the breaker."""
+        today = _utc_today()
+        if today != self._usage_day:
+            self._usage_day = today
+            self.tokens_today = 0
+        return self.tokens_today
+
     def _record_usage(self, role: str | None, model: str, usage) -> None:
         key = (role or "unattributed", model)
         totals = self.usage_totals.setdefault(
@@ -57,11 +69,7 @@ class LLM:
         completion = getattr(usage, "completion_tokens", 0) or 0
         totals["prompt_tokens"] += prompt
         totals["completion_tokens"] += completion
-        today = _utc_today()
-        if today != self._usage_day:
-            self._usage_day = today
-            self.tokens_today = 0
-        self.tokens_today += prompt + completion
+        self.tokens_today = self.tokens_in_current_window() + prompt + completion
 
     def usage_snapshot(self) -> list[tuple[dict[str, str], dict[str, int]]]:
         """[(labels, totals), ...] for the /metrics exposition, in stable order."""

@@ -464,7 +464,7 @@ def test_token_budget_pauses_pipeline(settings, tmp_path):
     orch.settings.data_dir = tmp_path
     orch.notifier = RecordingNotifier()
     orch.settings.llm_daily_token_budget = 1000
-    orch.llm = SimpleNamespace(tokens_today=1200)          # budget blown
+    orch.llm = SimpleNamespace(tokens_in_current_window=lambda: 1200)   # budget blown
 
     run(orch.sweep())
     assert orch.paused is True
@@ -485,7 +485,7 @@ def test_token_budget_disabled_by_default(settings, tmp_path):
     jira = FakeJira()
     orch = make_orchestrator(settings, jira, tmp_path)
     orch.notifier = RecordingNotifier()
-    orch.llm = SimpleNamespace(tokens_today=10**9)         # huge spend, no budget
+    orch.llm = SimpleNamespace(tokens_in_current_window=lambda: 10**9)  # huge spend, no budget
     assert orch.settings.llm_daily_token_budget == 0
     run(orch.sweep())
     assert orch.paused is False
@@ -496,8 +496,44 @@ def test_token_budget_under_limit_keeps_dispatching(settings, tmp_path):
     jira = FakeJira()
     orch = make_orchestrator(settings, jira, tmp_path)
     orch.settings.llm_daily_token_budget = 1000
-    orch.llm = SimpleNamespace(tokens_today=999)
+    orch.llm = SimpleNamespace(tokens_in_current_window=lambda: 999)
     run(orch.sweep())
     assert orch.paused is False
     run(orch._evaluate_ticket(issue("SENT-1", "Business Requirements")))
     assert orch.runner.runs == [("03-business-analyst", "SENT-1")]
+
+
+def test_token_budget_resume_after_midnight_sticks(settings, tmp_path, monkeypatch):
+    """Regression: the breaker must not be sticky across days. tokens_today only
+    reset on new usage writes, but while paused no LLM call ever happens — so a
+    resume after UTC midnight was instantly re-paused by yesterday's count."""
+    import sentinel.llm as llm_mod
+    from sentinel.llm import LLM
+
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    orch.settings.data_dir = tmp_path
+    orch.notifier = RecordingNotifier()
+    orch.settings.llm_daily_token_budget = 1000
+
+    monkeypatch.setattr(llm_mod, "_utc_today", lambda: "2026-07-17")
+    llm = LLM("https://llm.example.com/v1", "key", "gpt-4o")
+    llm._record_usage("07-implementer", "gpt-4o",
+                      SimpleNamespace(prompt_tokens=900, completion_tokens=300))
+    orch.llm = llm
+
+    run(orch.sweep())                                   # day N: budget blown
+    assert orch.paused is True
+
+    monkeypatch.setattr(llm_mod, "_utc_today", lambda: "2026-07-18")
+    run(orch.resume(by="operator"))                     # human resumes next day
+    run(orch.sweep())                                   # must NOT re-pause
+    assert orch.paused is False
+    assert orch.metrics.snapshot()["token_budget_pauses_total"] == 1
+
+    # new spend crossing the budget on day N+1 trips it again
+    llm._record_usage("07-implementer", "gpt-4o",
+                      SimpleNamespace(prompt_tokens=1100, completion_tokens=0))
+    run(orch.sweep())
+    assert orch.paused is True
+    assert orch.metrics.snapshot()["token_budget_pauses_total"] == 2
