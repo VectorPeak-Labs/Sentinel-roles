@@ -7,7 +7,9 @@ human-visible flags (agent-leased, needs-human, ...).
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import random
 from typing import Any
 
 import httpx
@@ -20,6 +22,7 @@ PROP_REWORK = "sentinel.rework"          # {"count": n, "rejected_from": "...", 
 PROP_WAITING = "sentinel.waiting"        # {"since": iso, "reason": str, "wake_at": iso|null}
 PROP_DEPLOYED = "sentinel.deployed"      # {"<env>": {"build": str, "at": iso}}
 PROP_RETRIES = "sentinel.retries"        # {"count": n} — orchestrator crash/reclaim retries
+PROP_REMINDED = "sentinel.reminded"      # {"at": iso} — last stale-escalation reminder
 
 
 class JiraError(RuntimeError):
@@ -31,9 +34,24 @@ class JiraError(RuntimeError):
 ISSUE_FIELDS = "summary,description,status,labels,assignee,issuetype,priority,updated,created,issuelinks,reporter"
 
 
+# Transient server/proxy conditions that mean "the request was NOT processed":
+# safe to retry for any method. Jira Server/DC emits these under load, during GC
+# pauses, reindexing, or reverse-proxy failover.
+RETRYABLE_STATUS = frozenset({429, 502, 503, 504})
+# Methods with no side effect (or naturally idempotent): safe to retry even when a
+# network error leaves the outcome unknown. A mutating POST (comment, transition,
+# create) is NOT retried on an ambiguous transport error, to avoid duplicates.
+IDEMPOTENT_METHODS = frozenset({"GET", "PUT", "DELETE"})
+
+
 class JiraClient:
-    def __init__(self, base_url: str, pat: str, timeout: float = 30.0):
+    def __init__(self, base_url: str, pat: str, timeout: float = 30.0,
+                 max_retries: int = 3, backoff_base: float = 0.5,
+                 backoff_cap: float = 20.0):
         self.base_url = base_url.rstrip("/")
+        self.max_retries = max(0, int(max_retries))
+        self.backoff_base = backoff_base
+        self.backoff_cap = backoff_cap
         self._client = httpx.AsyncClient(
             base_url=f"{self.base_url}/rest/api/2",
             headers={"Authorization": f"Bearer {pat}", "Accept": "application/json"},
@@ -43,11 +61,49 @@ class JiraClient:
     async def close(self) -> None:
         await self._client.aclose()
 
-    async def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
-        resp = await self._client.request(method, path, **kwargs)
-        if resp.status_code >= 400:
-            raise JiraError(resp.status_code, resp.text[:2000])
-        return resp
+    async def _backoff(self, attempt: int, retry_after: str | None) -> None:
+        """Sleep before a retry: honor a server Retry-After if given, else
+        exponential backoff, both with jitter and capped."""
+        delay: float | None = None
+        if retry_after:
+            try:
+                delay = float(retry_after)
+            except ValueError:
+                delay = None
+        if delay is None:
+            delay = self.backoff_base * (2 ** attempt)
+        delay = min(delay, self.backoff_cap)
+        delay += random.uniform(0, delay * 0.25)  # jitter to avoid thundering herd
+        if delay > 0:
+            await asyncio.sleep(delay)
+
+    async def _request(self, method: str, path: str, *,
+                       idempotent: bool | None = None, **kwargs) -> httpx.Response:
+        if idempotent is None:
+            idempotent = method.upper() in IDEMPOTENT_METHODS
+        attempt = 0
+        while True:
+            try:
+                resp = await self._client.request(method, path, **kwargs)
+            except httpx.TransportError as e:
+                # Network/timeout: only retry when the call is safe to repeat — a
+                # mutating POST may already have taken effect server-side.
+                if idempotent and attempt < self.max_retries:
+                    log.warning("Jira %s %s transport error (%s), retry %d/%d",
+                                method, path, e, attempt + 1, self.max_retries)
+                    await self._backoff(attempt, None)
+                    attempt += 1
+                    continue
+                raise JiraError(0, f"transport error: {e}") from e
+            if resp.status_code in RETRYABLE_STATUS and attempt < self.max_retries:
+                log.warning("Jira %s %s returned %d, retry %d/%d", method, path,
+                            resp.status_code, attempt + 1, self.max_retries)
+                await self._backoff(attempt, resp.headers.get("Retry-After"))
+                attempt += 1
+                continue
+            if resp.status_code >= 400:
+                raise JiraError(resp.status_code, resp.text[:2000])
+            return resp
 
     # -- identity ------------------------------------------------------------
 
@@ -67,7 +123,8 @@ class JiraClient:
         while True:
             payload = {"jql": jql, "startAt": start, "maxResults": min(max_results - len(issues), 50),
                        "fields": fields.split(",")}
-            data = (await self._request("POST", "/search", json=payload)).json()
+            # /search is a read expressed as POST — safe to retry on transport errors.
+            data = (await self._request("POST", "/search", json=payload, idempotent=True)).json()
             page = data.get("issues", [])
             issues.extend(page)
             if not page or len(issues) >= min(max_results, data.get("total", 0)):
@@ -121,9 +178,8 @@ class JiraClient:
         every request from this client — never send it elsewhere)."""
         if not content_url.startswith(self.base_url + "/"):
             raise JiraError(400, f"attachment URL is not on {self.base_url}: {content_url}")
-        resp = await self._client.get(content_url, follow_redirects=True)
-        if resp.status_code >= 400:
-            raise JiraError(resp.status_code, resp.text[:2000])
+        # Absolute URL (outside the /rest/api/2 base); GET, so it retries like any read.
+        resp = await self._request("GET", content_url, follow_redirects=True)
         return resp.content
 
     async def upload_attachment(self, key: str, filename: str, data: bytes,

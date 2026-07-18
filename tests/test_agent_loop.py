@@ -233,3 +233,37 @@ def test_dispatch_aborts_if_ticket_actively_leased(settings, tmp_path):
 
     assert llm.calls == 0
     assert jira.transitions == []
+
+
+def test_cancellation_releases_all_held_leases(settings, tmp_path):
+    """On shutdown/redeploy the agent run is cancelled; it must release the ticket
+    lease AND any tickets a queue role self-claimed, so nothing stays frozen until
+    the stale-lease timeout. It must NOT bump the retry counter (not a failure)."""
+    jira = FakeJira()
+    seed_ticket(jira, "SENT-1")
+    runner = make_runner(settings, jira, FakeLLM(), tmp_path)
+    started = asyncio.Event()
+
+    async def fake_loop(ctx, kickoff):
+        await ctx.leases.claim("SENT-2", ctx.role.role_id)   # queue-style extra claim
+        ctx.extra_leased.add("SENT-2")
+        started.set()
+        await asyncio.Event().wait()                          # block until cancelled
+
+    runner._loop = fake_loop
+    role = settings.roles["03-business-analyst"]
+
+    async def main():
+        task = asyncio.create_task(runner.run(role, "SENT-1", "go"))
+        await started.wait()
+        assert ("SENT-1", PROP_LEASE) in jira.properties
+        assert ("SENT-2", PROP_LEASE) in jira.properties
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # both leases freed immediately, and no retry breadcrumb left behind
+        assert ("SENT-1", PROP_LEASE) not in jira.properties
+        assert ("SENT-2", PROP_LEASE) not in jira.properties
+        assert ("SENT-1", PROP_RETRIES) not in jira.properties
+
+    asyncio.run(main())

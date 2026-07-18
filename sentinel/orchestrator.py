@@ -11,20 +11,37 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shutil
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from .agent import AgentRunner
 from .audit import AuditLog
 from .config import RoleConfig, Settings
-from .jira import (JiraClient, JiraError, PROP_LEASE, PROP_RETRIES, PROP_REWORK,
-                   PROP_WAITING)
+from .jira import (JiraClient, JiraError, PROP_LEASE, PROP_REMINDED, PROP_RETRIES,
+                   PROP_REWORK, PROP_WAITING)
 from .lease import LeaseManager
-from .llm import LLM
+from .llm import DEGRADED_AFTER as LLM_DEGRADED_AFTER, LLM
+from .metrics import Metrics
 from .notify import Notifier
 from .payloads import find_payload, validate_handoff
 
 log = logging.getLogger("sentinel.orchestrator")
+
+
+def _dir_size_bytes(path: Path) -> int:
+    """Total size of regular files under `path` (symlinks skipped: a workspace
+    symlink must not let files outside the tree count against — or protect —
+    the quota)."""
+    total = 0
+    for p in path.rglob("*"):
+        try:
+            if p.is_file() and not p.is_symlink():
+                total += p.stat().st_size
+        except OSError:
+            continue        # file vanished mid-walk (agent activity) — skip
+    return total
 
 
 def _parse_ts(value: str | None) -> datetime | None:
@@ -44,13 +61,14 @@ def _parse_ts(value: str | None) -> datetime | None:
 
 class Orchestrator:
     def __init__(self, settings: Settings, jira: JiraClient, llm: LLM, audit: AuditLog,
-                 notifier: Notifier | None = None):
+                 notifier: Notifier | None = None, metrics: Metrics | None = None):
         self.settings = settings
         self.jira = jira
         self.llm = llm
         self.audit = audit
         # Disabled Notifier when none supplied, so `.notify(...)` is always safe.
         self.notifier = notifier or Notifier()
+        self.metrics = metrics or Metrics()
         self.agent_user: str = ""
         self.leases: LeaseManager | None = None
         self.runner: AgentRunner | None = None
@@ -69,6 +87,9 @@ class Orchestrator:
         self.sweep_count = 0
         self.consecutive_sweep_failures = 0
         self.last_sweep_error: str | None = None
+        # Board snapshot refreshed each sweep — pipeline backlog for /metrics.
+        self.board_state: dict = {"by_status": {}, "needs_human": 0,
+                                  "handoff_invalid": 0, "total": 0}
         # Global pause (operational kill-switch): when set, no NEW agents are
         # dispatched (ticket or queue); in-flight runs drain to completion. The
         # state is persisted to disk so a container restart mid-incident does not
@@ -76,6 +97,11 @@ class Orchestrator:
         self.paused = False
         self.paused_at: str | None = None
         self.pause_reason: str | None = None
+        # Automatic LLM outage gate: while the LiteLLM backend is failing, stop
+        # dispatching (each dispatch would just crash on its first chat call,
+        # burn the ticket's retry budget and flood the board with needs-human).
+        # Unlike the operator pause it lifts itself when a probe succeeds.
+        self.llm_gated = False
 
     async def start(self) -> None:
         me = await self.jira.myself()
@@ -85,7 +111,7 @@ class Orchestrator:
                                    self.settings.lease_timeout)
         self.runner = AgentRunner(self.settings, self.jira, self.llm,
                                   self.leases, self.audit, self.agent_user,
-                                  self.notifier)
+                                  self.notifier, self.metrics)
         self._load_pause_state()
         log.info("orchestrator started as Jira user '%s', project %s, %d roles%s",
                  self.agent_user, self.settings.jira_project, len(self.settings.roles),
@@ -134,6 +160,64 @@ class Orchestrator:
             + (f": {self.pause_reason}" if self.pause_reason else ""),
             by=by, reason=self.pause_reason)
 
+    async def _enforce_token_budget(self) -> None:
+        """Daily LLM token budget circuit breaker: when the day's spend crosses
+        SENTINEL_LLM_DAILY_TOKEN_BUDGET, freeze dispatch via the existing pause
+        (cordon-and-drain: in-flight runs finish, nothing new starts). Resuming
+        is a deliberate human act — POST /resume — even after the day rolls
+        over: a blown budget means something ran away, not that midnight fixes it."""
+        budget = self.settings.llm_daily_token_budget
+        if budget <= 0 or self.paused or self.llm is None:
+            return
+        # The rolling read matters: while paused no new LLM call resets the
+        # counter, so a plain tokens_today would stay exhausted forever.
+        spent = self.llm.tokens_in_current_window()
+        if spent >= budget:
+            self.metrics.inc("token_budget_pauses_total")
+            await self.pause(
+                reason=f"daily LLM token budget exhausted ({spent} >= {budget} tokens)",
+                by="token-budget")
+
+    async def _check_llm_gate(self) -> None:
+        """LLM outage circuit breaker (the behavioral half of the /health
+        'degraded' signal): while the backend is failing, dispatching agents
+        only converts the outage into per-ticket damage — every run crashes on
+        its first chat call, burns the ticket's retry budget and escalates.
+        Gate dispatch instead, and probe once per sweep so the gate lifts
+        itself the moment the backend recovers (a successful chat resets
+        consecutive_failures). No probe = no recovery signal, since a gated
+        pipeline makes no LLM calls of its own — the budget-breaker lesson."""
+        if self.llm is None:
+            return
+        if self.llm.consecutive_failures >= LLM_DEGRADED_AFTER:
+            if not self.llm_gated:
+                self.llm_gated = True
+                self.metrics.inc("llm_gate_engagements_total")
+                log.warning("LLM backend failing (%d consecutive failures) — "
+                            "dispatch suspended", self.llm.consecutive_failures)
+                self.audit.record("llm_gate_engaged",
+                                  failures=self.llm.consecutive_failures,
+                                  error=self.llm.last_error)
+                await self.notifier.notify(
+                    "llm_outage",
+                    f"🛑 {self.settings.jira_project} LLM backend is failing "
+                    f"({self.llm.last_error}) — dispatch suspended until it recovers",
+                    error=self.llm.last_error)
+            try:
+                await self.llm.chat(
+                    [{"role": "user", "content": "Reply with the single word: ok"}],
+                    role="llm-probe")
+            except Exception:
+                pass    # still down — stay gated, probe again next sweep
+        if self.llm_gated and self.llm.consecutive_failures < LLM_DEGRADED_AFTER:
+            self.llm_gated = False
+            log.warning("LLM backend recovered — dispatch resumed")
+            self.audit.record("llm_gate_lifted")
+            await self.notifier.notify(
+                "llm_recovered",
+                f"✅ {self.settings.jira_project} LLM backend recovered — "
+                f"dispatch resumed")
+
     async def resume(self, by: str = "operator") -> None:
         self.paused = False
         self.paused_at = None
@@ -152,8 +236,21 @@ class Orchestrator:
 
     async def stop(self) -> None:
         self._stopped.set()
-        for (role_id, ticket), (task, _) in list(self.running.items()):
+        running = list(self.running.items())
+        tasks = [task for _, (task, _) in running]
+        for task in tasks:
             task.cancel()
+        # Let each cancelled agent run its own cleanup (release the ticket lease it
+        # holds *and* any tickets a queue role self-claimed) before the HTTP clients
+        # close in the lifespan shutdown. Bounded so one stuck agent can't hang exit.
+        if tasks:
+            try:
+                await asyncio.wait(tasks, timeout=self.settings.shutdown_grace_seconds)
+            except Exception:
+                log.warning("error while draining agents on shutdown")
+        # Fallback for ticket-scoped roles whose cleanup did not finish in time
+        # (release is idempotent, so double-releasing a freed lease is harmless).
+        for (role_id, ticket), (task, _) in running:
             if ticket and self.leases:
                 try:
                     await self.leases.release(ticket)
@@ -195,17 +292,21 @@ class Orchestrator:
             # 01 failure path: Jira unavailable -> halt dispatching, resume with full sweep
             self.consecutive_sweep_failures += 1
             self.last_sweep_error = str(e)
+            self.metrics.inc("sweep_failures_total")
             log.error("sweep failed (Jira unavailable?): %s", e)
             self.audit.record("sweep_failed", error=str(e))
         except Exception as e:
             self.consecutive_sweep_failures += 1
             self.last_sweep_error = f"{type(e).__name__}: {e}"
+            self.metrics.inc("sweep_failures_total")
             log.exception("sweep crashed")
             self.audit.record("sweep_failed", error=self.last_sweep_error)
 
     # -- sweep -------------------------------------------------------------
 
     async def sweep(self) -> None:
+        await self._enforce_token_budget()
+        await self._check_llm_gate()
         self._gc_running()
         statuses = ", ".join(f'"{s}"' for s in self.settings.agent_statuses)
         issues = await self.jira.search(
@@ -215,6 +316,7 @@ class Orchestrator:
                  len(issues), len(self.running), " [PAUSED]" if self.paused else "")
         self.last_sweep_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         self.sweep_count += 1
+        self._compute_board_state(issues)
         async with self._lock:
             for issue in issues:
                 try:
@@ -222,6 +324,113 @@ class Orchestrator:
                 except Exception:
                     log.exception("evaluation failed for %s", issue.get("key"))
             await self._evaluate_queues(issues)
+        # Re-surface escalations a human has left frozen (ORC-1: nothing silently stuck).
+        try:
+            await self._remind_stale_escalations(issues)
+        except Exception:
+            log.exception("stale-escalation scan failed")
+        # Housekeeping: keep shell-role workspaces from filling the /data volume.
+        try:
+            await self._enforce_workspace_quota()
+        except Exception:
+            log.exception("workspace quota scan failed")
+
+    async def _enforce_workspace_quota(self) -> None:
+        """Wipe idle role workspaces that outgrew SENTINEL_WORKSPACE_MAX_BYTES.
+
+        Shell roles clone repos and run builds in persistent per-role dirs on
+        the same fixed /data volume as the audit log and pause state; left
+        unbounded they eventually fill it and break every write path at once
+        (the audit log is size-rotated for the same reason). Wiping is safe by
+        contract — project commands must tolerate a fresh workspace (first run
+        of a container starts empty) — but only ever touches roles with **no
+        agent currently running**, and the deletion itself happens under the
+        dispatch lock so no agent can start into a half-deleted tree."""
+        cap = self.settings.workspace_max_bytes
+        if cap <= 0:
+            return
+        base = self.settings.data_dir / "workspace"
+        if not base.exists():
+            return
+        # Size the trees off the event loop and without the lock (walking a
+        # multi-GB clone can take a while); re-check "running" under the lock.
+        def scan() -> list[tuple[str, int]]:
+            out = []
+            for role_dir in sorted(base.iterdir()):
+                if role_dir.is_dir():
+                    size = _dir_size_bytes(role_dir)
+                    if size > cap:
+                        out.append((role_dir.name, size))
+            return out
+        oversized = await asyncio.to_thread(scan)
+        if not oversized:
+            return
+        async with self._lock:
+            running_roles = {role_id for (role_id, _t) in self.running}
+            for role_id, size in oversized:
+                if role_id in running_roles:
+                    continue        # never yank a workspace out from under an agent
+                await asyncio.to_thread(shutil.rmtree, base / role_id, True)
+                log.warning("workspace %s exceeded quota (%d > %d bytes) — wiped",
+                            role_id, size, cap)
+                self.metrics.inc("workspace_wipes_total")
+                self.audit.record("workspace_wiped", role=role_id, bytes=size)
+
+    async def _remind_stale_escalations(self, issues: list[dict]) -> None:
+        """Escalation alerts fire once when a ticket freezes; if a human never
+        acts, the ticket sits `needs-human` indefinitely with no further signal.
+        Re-alert for tickets frozen and untouched beyond `stale_escalation_hours`,
+        deduped per ticket to at most one reminder per window (sentinel.reminded)."""
+        hours = self.settings.stale_escalation_hours
+        if hours <= 0:
+            return
+        threshold = timedelta(hours=hours)
+        now = datetime.now(timezone.utc)
+        nh = self.settings.label("needs_human")
+        hi = self.settings.label("handoff_invalid")
+        for issue in issues:
+            key = issue.get("key")
+            fields = issue.get("fields", {})
+            labels = fields.get("labels") or []
+            if nh not in labels and hi not in labels:
+                continue
+            updated = _parse_ts(fields.get("updated"))
+            if updated and (now - updated) < threshold:
+                continue  # a human touched it recently — not abandoned
+            reminded = await self.jira.get_property(key, PROP_REMINDED) or {}
+            last = _parse_ts(reminded.get("at"))
+            if last and (now - last) < threshold:
+                continue  # already reminded within this window — don't spam
+            await self.jira.set_property(
+                key, PROP_REMINDED, {"at": now.isoformat(timespec="seconds")})
+            self.metrics.inc("stale_escalation_reminders_total")
+            self.audit.record("stale_escalation_reminder", ticket=key, hours=hours,
+                              updated=fields.get("updated"))
+            await self.notifier.notify(
+                "stale_escalation",
+                f"⏰ {self.settings.jira_project} {key} has been frozen awaiting a human "
+                f"for over {int(hours)}h and nobody has acted. Remove `{nh}` to resume "
+                f"or take the decision the ticket is blocked on.",
+                ticket=key, hours=hours)
+
+    def _compute_board_state(self, issues: list[dict]) -> None:
+        """Snapshot the board for /metrics: per-status queue depth plus how many
+        tickets are frozen (needs-human) or flagged (handoff-invalid)."""
+        by_status: dict[str, int] = {}
+        needs_human = handoff_invalid = 0
+        nh = self.settings.label("needs_human")
+        hi = self.settings.label("handoff_invalid")
+        for issue in issues:
+            fields = issue.get("fields", {})
+            status = (fields.get("status") or {}).get("name") or "unknown"
+            by_status[status] = by_status.get(status, 0) + 1
+            labels = fields.get("labels") or []
+            if nh in labels:
+                needs_human += 1
+            if hi in labels:
+                handoff_invalid += 1
+        self.board_state = {"by_status": by_status, "needs_human": needs_human,
+                            "handoff_invalid": handoff_invalid, "total": len(issues)}
 
     def _gc_running(self) -> None:
         for key, (task, _) in list(self.running.items()):
@@ -234,8 +443,8 @@ class Orchestrator:
     # -- per-ticket dispatch ------------------------------------------------
 
     async def _evaluate_ticket(self, issue: dict) -> None:
-        if self.paused:
-            return  # global pause: dispatch nothing, take no side effects (drain)
+        if self.paused or self.llm_gated:
+            return  # pause / LLM outage: dispatch nothing, take no side effects
         key = issue["key"]
         fields = issue.get("fields", {})
         status = (fields.get("status") or {}).get("name", "")
@@ -266,6 +475,7 @@ class Orchestrator:
             retries = await self.jira.get_property(key, PROP_RETRIES) or {"count": 0}
             retries["count"] = int(retries.get("count", 0)) + 1
             await self.jira.set_property(key, PROP_RETRIES, retries)
+            self.metrics.inc("lease_reclaims_total")
             self.audit.record("lease_reclaimed", ticket=key, role=lease.get("role"),
                               retries=retries["count"])
             # fall through: the generic retry check below decides retry vs escalate
@@ -321,8 +531,8 @@ class Orchestrator:
     # -- queue roles ----------------------------------------------------------
 
     async def _evaluate_queues(self, issues: list[dict]) -> None:
-        if self.paused:
-            return  # global pause: no queue-role singletons while frozen
+        if self.paused or self.llm_gated:
+            return  # pause / LLM outage: no queue-role singletons while frozen
         by_status: dict[str, list[dict]] = {}
         for issue in issues:
             status = ((issue.get("fields") or {}).get("status") or {}).get("name", "")
@@ -383,6 +593,7 @@ class Orchestrator:
         task = asyncio.create_task(self.runner.run(role, ticket, kickoff),
                                    name=f"{role.role_id}:{ticket or 'queue'}")
         self.running[(role.role_id, ticket)] = (task, status)
+        self.metrics.inc("dispatches_total")
         self.audit.record("dispatch_scheduled", role=role.role_id, ticket=ticket, status=status)
         log.info("dispatched %s on %s", role.role_id, ticket or "queue")
 
@@ -391,6 +602,7 @@ class Orchestrator:
         await self.jira.add_comment(
             key, f"[sentinel] ORCHESTRATOR ESCALATION\n\n{reason}\n\n"
                  f"Remove the `{self.settings.label('needs_human')}` label to resume the pipeline.")
+        self.metrics.inc("escalations_total")
         self.audit.record("orchestrator_escalation", ticket=key, reason=reason)
         await self.notifier.notify(
             "orchestrator_escalation",
@@ -435,6 +647,12 @@ class Orchestrator:
             if not keys:
                 return
             try:
+                # The webhook fast-path dispatches between sweeps, so it must
+                # respect a budget blown — or an LLM outage that developed —
+                # mid-window too, or it keeps burning retry budgets until the
+                # next sweep notices.
+                await self._enforce_token_budget()
+                await self._check_llm_gate()
                 async with self._lock:
                     self._gc_running()
                     for key in keys:
@@ -472,6 +690,7 @@ class Orchestrator:
                 payload = candidate
                 break
         if payload is None or not validate_handoff(payload).ok:
+            self.metrics.inc("handoff_invalid_total")
             await self.jira.update_labels(key, add=[self.settings.label("handoff_invalid")])
             await self._escalate(
                 key, f"Agent transition '{from_status}' -> '{to_status}' has no valid "
@@ -479,6 +698,7 @@ class Orchestrator:
                      f"was NOT reverted; a human must review it.")
         else:
             # Clean handoff observed — reset the crash-retry counter for the new stage.
+            self.metrics.inc("transitions_validated_total")
             await self.jira.delete_property(key, PROP_RETRIES)
             self.audit.record("agent_transition_validated", ticket=key,
                               from_status=from_status, to_status=to_status,

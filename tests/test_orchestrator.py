@@ -5,13 +5,16 @@ dispatched, when a ticket is skipped, reclaimed, or escalated (ORC-1..4).
 """
 
 import asyncio
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 import yaml
 
 from sentinel.audit import AuditLog
 from sentinel.config import load_settings
-from sentinel.jira import PROP_LEASE, PROP_RETRIES, PROP_REWORK, PROP_WAITING
+from sentinel.jira import (PROP_LEASE, PROP_REMINDED, PROP_RETRIES, PROP_REWORK,
+                           PROP_WAITING)
 from sentinel.lease import LeaseManager
 from sentinel.orchestrator import Orchestrator
 
@@ -315,6 +318,99 @@ def test_escalation_fires_notification(settings, tmp_path):
     assert orch.notifier.events == [("orchestrator_escalation", "SENT-1")]
 
 
+def test_sweep_computes_board_state(settings, tmp_path):
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    board = [
+        issue("SENT-1", "In Progress"),
+        issue("SENT-2", "In Progress"),
+        issue("SENT-3", "Rework", labels=["needs-human"]),
+        issue("SENT-4", "Tech Review", labels=["handoff-invalid"]),
+    ]
+
+    async def fake_search(jql, max_results=100, fields=None):
+        return board
+
+    async def main():
+        jira.search = fake_search
+        await orch.sweep()
+
+    asyncio.run(main())
+    bs = orch.board_state
+    assert bs["total"] == 4
+    assert bs["by_status"]["In Progress"] == 2
+    assert bs["by_status"]["Rework"] == 1
+    assert bs["needs_human"] == 1
+    assert bs["handoff_invalid"] == 1
+
+
+def test_metrics_count_dispatch_and_escalation(settings, tmp_path):
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    # a clean dispatch
+    run(orch._evaluate_ticket(issue("SENT-1", "Business Requirements")))
+    # a forced escalation on another ticket
+    jira.properties[("SENT-2", PROP_RETRIES)] = {"count": 2}
+    run(orch._evaluate_ticket(issue("SENT-2", "Business Requirements")))
+    snap = orch.metrics.snapshot()
+    assert snap["dispatches_total"] == 1
+    assert snap["escalations_total"] == 1
+
+
+def _ago(hours):
+    return (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat(timespec="seconds")
+
+
+def frozen_issue(key="SENT-1", hours_since_update=48, labels=("needs-human",)):
+    return issue(key, "Rework", labels=list(labels), updated=_ago(hours_since_update))
+
+
+def test_stale_escalation_is_reminded(settings, tmp_path):
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    orch.notifier = RecordingNotifier()
+    run(orch._remind_stale_escalations([frozen_issue("SENT-1", hours_since_update=48)]))
+    assert orch.notifier.events == [("stale_escalation", "SENT-1")]
+    assert ("SENT-1", PROP_REMINDED) in jira.properties
+    assert orch.metrics.snapshot()["stale_escalation_reminders_total"] == 1
+
+
+def test_recently_touched_escalation_not_reminded(settings, tmp_path):
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    orch.notifier = RecordingNotifier()
+    # a human commented an hour ago (updated is recent) -> not abandoned
+    run(orch._remind_stale_escalations([frozen_issue("SENT-1", hours_since_update=1)]))
+    assert orch.notifier.events == []
+
+
+def test_reminder_deduped_within_window(settings, tmp_path):
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    orch.notifier = RecordingNotifier()
+    jira.properties[("SENT-1", PROP_REMINDED)] = {"at": _ago(1)}  # reminded an hour ago
+    run(orch._remind_stale_escalations([frozen_issue("SENT-1", hours_since_update=48)]))
+    assert orch.notifier.events == []                             # once per window only
+
+
+def test_non_frozen_ticket_not_reminded(settings, tmp_path):
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    orch.notifier = RecordingNotifier()
+    run(orch._remind_stale_escalations(
+        [issue("SENT-1", "Rework", updated=_ago(72))]))  # old but not needs-human
+    assert orch.notifier.events == []
+
+
+def test_reminders_disabled_when_hours_zero(settings, tmp_path):
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    orch.settings.stale_escalation_hours = 0
+    orch.notifier = RecordingNotifier()
+    run(orch._remind_stale_escalations([frozen_issue("SENT-1", hours_since_update=999)]))
+    assert orch.notifier.events == []
+
+
 def test_pause_and_resume_fire_notifications(settings, tmp_path):
     jira = FakeJira()
     orch = make_orchestrator(settings, jira, tmp_path)
@@ -323,6 +419,24 @@ def test_pause_and_resume_fire_notifications(settings, tmp_path):
     run(orch.pause(reason="incident", by="alice"))
     run(orch.resume(by="alice"))
     assert [e[0] for e in orch.notifier.events] == ["pipeline_paused", "pipeline_resumed"]
+
+
+def test_stop_cancels_agents_and_releases_leases(settings, tmp_path):
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    jira.properties[("SENT-1", PROP_LEASE)] = {
+        "role": "03-business-analyst", "heartbeat": "2099-01-01T00:00:00+00:00"}
+
+    async def main():
+        async def blocker():
+            await asyncio.Event().wait()
+        task = asyncio.create_task(blocker())
+        orch.running[("03-business-analyst", "SENT-1")] = (task, "Business Requirements")
+        await orch.stop()
+        assert task.cancelled()                              # in-flight agent stopped
+        assert ("SENT-1", PROP_LEASE) not in jira.properties  # lease freed, not stranded
+
+    asyncio.run(main())
 
 
 def test_pause_state_survives_restart(settings, tmp_path):
@@ -342,3 +456,232 @@ def test_pause_state_survives_restart(settings, tmp_path):
     # ...and resume clears the persisted state so the next restart starts clean.
     run(revived.resume(by="alice"))
     assert not (tmp_path / "pause.json").exists()
+
+
+def test_token_budget_pauses_pipeline(settings, tmp_path):
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    orch.settings.data_dir = tmp_path
+    orch.notifier = RecordingNotifier()
+    orch.settings.llm_daily_token_budget = 1000
+    orch.llm = SimpleNamespace(tokens_in_current_window=lambda: 1200,
+                               consecutive_failures=0)      # budget blown
+
+    run(orch.sweep())
+    assert orch.paused is True
+    assert "token budget exhausted" in orch.pause_reason
+    assert orch.metrics.snapshot()["token_budget_pauses_total"] == 1
+    assert ("pipeline_paused", None) in orch.notifier.events
+
+    # further sweeps while paused do not re-trip the breaker (no alert storm)
+    run(orch.sweep())
+    assert orch.metrics.snapshot()["token_budget_pauses_total"] == 1
+
+    # dispatch stays suppressed while paused
+    run(orch._evaluate_ticket(issue("SENT-1", "Business Requirements")))
+    assert orch.runner.runs == []
+
+
+def test_token_budget_disabled_by_default(settings, tmp_path):
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    orch.notifier = RecordingNotifier()
+    orch.llm = SimpleNamespace(tokens_in_current_window=lambda: 10**9,
+                               consecutive_failures=0)      # huge spend, no budget
+    assert orch.settings.llm_daily_token_budget == 0
+    run(orch.sweep())
+    assert orch.paused is False
+    assert orch.notifier.events == []
+
+
+def test_token_budget_under_limit_keeps_dispatching(settings, tmp_path):
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    orch.settings.llm_daily_token_budget = 1000
+    orch.llm = SimpleNamespace(tokens_in_current_window=lambda: 999,
+                               consecutive_failures=0)
+    run(orch.sweep())
+    assert orch.paused is False
+    run(orch._evaluate_ticket(issue("SENT-1", "Business Requirements")))
+    assert orch.runner.runs == [("03-business-analyst", "SENT-1")]
+
+
+def test_token_budget_resume_after_midnight_sticks(settings, tmp_path, monkeypatch):
+    """Regression: the breaker must not be sticky across days. tokens_today only
+    reset on new usage writes, but while paused no LLM call ever happens — so a
+    resume after UTC midnight was instantly re-paused by yesterday's count."""
+    import sentinel.llm as llm_mod
+    from sentinel.llm import LLM
+
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    orch.settings.data_dir = tmp_path
+    orch.notifier = RecordingNotifier()
+    orch.settings.llm_daily_token_budget = 1000
+
+    monkeypatch.setattr(llm_mod, "_utc_today", lambda: "2026-07-17")
+    llm = LLM("https://llm.example.com/v1", "key", "gpt-4o")
+    llm._record_usage("07-implementer", "gpt-4o",
+                      SimpleNamespace(prompt_tokens=900, completion_tokens=300))
+    orch.llm = llm
+
+    run(orch.sweep())                                   # day N: budget blown
+    assert orch.paused is True
+
+    monkeypatch.setattr(llm_mod, "_utc_today", lambda: "2026-07-18")
+    run(orch.resume(by="operator"))                     # human resumes next day
+    run(orch.sweep())                                   # must NOT re-pause
+    assert orch.paused is False
+    assert orch.metrics.snapshot()["token_budget_pauses_total"] == 1
+
+    # new spend crossing the budget on day N+1 trips it again
+    llm._record_usage("07-implementer", "gpt-4o",
+                      SimpleNamespace(prompt_tokens=1100, completion_tokens=0))
+    run(orch.sweep())
+    assert orch.paused is True
+    assert orch.metrics.snapshot()["token_budget_pauses_total"] == 2
+
+
+class OutageFakeLLM:
+    """Simulates a failing LiteLLM backend: probes fail until recover_on_probe
+    is set, at which point a probe succeeds and resets the failure counter
+    (mirroring the real LLM.chat behavior)."""
+    def __init__(self, failures):
+        self.consecutive_failures = failures
+        self.last_error = "APIConnectionError"
+        self.probes = 0
+        self.recover_on_probe = False
+
+    async def chat(self, messages, tools=None, model=None, temperature=None,
+                   role=None):
+        self.probes += 1
+        if self.recover_on_probe:
+            self.consecutive_failures = 0
+            return SimpleNamespace(content="ok")
+        self.consecutive_failures += 1
+        raise RuntimeError("down")
+
+
+def test_llm_gate_suspends_dispatch_during_outage(settings, tmp_path):
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    orch.notifier = RecordingNotifier()
+    orch.llm = OutageFakeLLM(failures=3)
+
+    run(orch.sweep())
+    assert orch.llm_gated is True
+    assert orch.llm.probes == 1                                  # probed for recovery
+    assert orch.notifier.events == [("llm_outage", None)]
+    assert orch.metrics.snapshot()["llm_gate_engagements_total"] == 1
+
+    run(orch._evaluate_ticket(issue("SENT-1", "Business Requirements")))
+    assert orch.runner.runs == []                                # dispatch suppressed
+
+    run(orch.sweep())                                            # still down
+    assert orch.notifier.events == [("llm_outage", None)]        # no alert storm
+    assert orch.llm.probes == 2                                  # keeps probing
+
+
+def test_llm_gate_lifts_itself_when_probe_succeeds(settings, tmp_path):
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    orch.notifier = RecordingNotifier()
+    orch.llm = OutageFakeLLM(failures=3)
+
+    run(orch.sweep())
+    assert orch.llm_gated is True
+
+    orch.llm.recover_on_probe = True                             # backend comes back
+    run(orch.sweep())
+    assert orch.llm_gated is False
+    assert orch.notifier.events == [("llm_outage", None), ("llm_recovered", None)]
+
+    run(orch._evaluate_ticket(issue("SENT-1", "Business Requirements")))
+    assert orch.runner.runs == [("03-business-analyst", "SENT-1")]   # dispatch resumed
+
+
+def test_llm_gate_not_engaged_below_threshold(settings, tmp_path):
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    orch.notifier = RecordingNotifier()
+    orch.llm = OutageFakeLLM(failures=2)                         # under the threshold
+
+    run(orch.sweep())
+    assert orch.llm_gated is False
+    assert orch.llm.probes == 0                                  # healthy: no probe calls
+    assert orch.notifier.events == []
+    run(orch._evaluate_ticket(issue("SENT-1", "Business Requirements")))
+    assert orch.runner.runs == [("03-business-analyst", "SENT-1")]
+
+
+def test_llm_gate_covers_webhook_fast_path(settings, tmp_path):
+    """Regression: an outage that develops BETWEEN sweeps (e.g. from failed
+    webhook-triggered runs) must gate the webhook fast-path too, not keep
+    dispatching into the outage until the next scheduled sweep."""
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    orch.notifier = RecordingNotifier()
+    orch.webhook_debounce_seconds = 0
+    orch.llm = OutageFakeLLM(failures=3)
+    jira.issues["SENT-1"] = issue("SENT-1", "Business Requirements")
+
+    orch._pending_keys.add("SENT-1")
+    run(orch._flush_pending())
+    assert orch.llm_gated is True                        # gate engaged by the flush
+    assert orch.llm.probes == 1                          # probing started
+    assert orch.notifier.events == [("llm_outage", None)]
+    assert orch.runner.runs == []                        # no dispatch into the outage
+
+    orch.llm.recover_on_probe = True                     # backend recovers
+    orch._pending_keys.add("SENT-1")
+    run(orch._flush_pending())
+    assert orch.llm_gated is False                       # flush probe lifted the gate
+    assert ("llm_recovered", None) in orch.notifier.events
+
+
+def _fill_workspace(base, role_id, nbytes):
+    d = base / "workspace" / role_id
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "clone.bin").write_bytes(b"x" * nbytes)
+    return d
+
+
+def test_workspace_quota_wipes_oversized_idle_workspace(settings, tmp_path):
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    orch.settings.data_dir = tmp_path
+    orch.settings.workspace_max_bytes = 100
+    big = _fill_workspace(tmp_path, "07-implementer", 500)       # over the cap
+    small = _fill_workspace(tmp_path, "08-code-reviewer", 50)    # under the cap
+
+    run(orch.sweep())
+    assert not big.exists()                                      # wiped
+    assert small.exists()                                        # untouched
+    assert orch.metrics.snapshot()["workspace_wipes_total"] == 1
+
+
+def test_workspace_quota_spares_running_roles(settings, tmp_path):
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    orch.settings.data_dir = tmp_path
+    orch.settings.workspace_max_bytes = 100
+    big = _fill_workspace(tmp_path, "07-implementer", 500)
+
+    async def main():
+        t = asyncio.create_task(asyncio.sleep(3600))
+        orch.running[("07-implementer", "SENT-1")] = (t, "In Progress")
+        await orch.sweep()
+        t.cancel()
+    asyncio.run(main())
+    assert big.exists()                                          # agent running: spared
+    assert orch.metrics.snapshot()["workspace_wipes_total"] == 0
+
+
+def test_workspace_quota_disabled_by_default(settings, tmp_path):
+    jira = FakeJira()
+    orch = make_orchestrator(settings, jira, tmp_path)
+    orch.settings.data_dir = tmp_path
+    big = _fill_workspace(tmp_path, "07-implementer", 500)
+    assert orch.settings.workspace_max_bytes == 0
+    run(orch.sweep())
+    assert big.exists()                                          # quota off: untouched

@@ -25,6 +25,7 @@ from .jira import (JiraClient, JiraError, PROP_DEPLOYED, PROP_LEASE, PROP_RETRIE
                    PROP_REWORK, PROP_WAITING)
 from .lease import LeaseManager
 from .llm import LLM
+from .metrics import Metrics
 from .notify import Notifier
 from .payloads import find_payload, validate_handoff, validate_rejection
 
@@ -65,6 +66,7 @@ class ToolContext:
     ticket: str | None            # the leased ticket for ticket-scoped roles, else None
     workspace: Path
     notifier: Notifier | None = None  # outbound alert channel (None = disabled)
+    metrics: Metrics | None = None    # counter registry (None = not recorded)
     extra_leased: set[str] = field(default_factory=set)  # tickets a queue role leased itself
 
     @property
@@ -515,6 +517,8 @@ async def _escalate(ctx: ToolContext, args: dict) -> ToolResult:
     ctx.extra_leased.discard(key)
     ctx.audit.record("escalation", role=ctx.role.role_id, ticket=key, reason=args["reason"],
                      decision_needed=args["decision_needed"])
+    if ctx.metrics is not None:
+        ctx.metrics.inc("escalations_total")
     if ctx.notifier is not None:
         await ctx.notifier.notify(
             "agent_escalation",
@@ -650,7 +654,7 @@ async def _run_estimators(ctx: ToolContext, args: dict) -> ToolResult:
             msg = await ctx.llm.chat(
                 [{"role": "system", "content": _ESTIMATOR_PROMPT},
                  {"role": "user", "content": prompt}],
-                model=ctx.role.model, temperature=1.0)
+                model=ctx.role.model, temperature=1.0, role=ctx.role.role_id)
             return {"estimator": i + 1, "response": (msg.content or "").strip()}
         except Exception as e:
             return {"estimator": i + 1, "error": str(e)}

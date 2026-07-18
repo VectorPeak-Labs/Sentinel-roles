@@ -19,6 +19,7 @@ from .config import RoleConfig, Settings
 from .jira import JiraClient, PROP_RETRIES
 from .lease import LeaseError, LeaseManager
 from .llm import LLM
+from .metrics import Metrics
 from .notify import Notifier
 from .audit import AuditLog
 from . import tools as toolsmod
@@ -86,7 +87,7 @@ by the humans (use these rather than guessing):
 class AgentRunner:
     def __init__(self, settings: Settings, jira: JiraClient, llm: LLM,
                  leases: LeaseManager, audit: AuditLog, agent_user: str,
-                 notifier: "Notifier | None" = None):
+                 notifier: "Notifier | None" = None, metrics: "Metrics | None" = None):
         self.settings = settings
         self.jira = jira
         self.llm = llm
@@ -94,6 +95,7 @@ class AgentRunner:
         self.audit = audit
         self.agent_user = agent_user
         self.notifier = notifier
+        self.metrics = metrics
 
     async def run(self, role: RoleConfig, ticket: str | None, kickoff: str) -> None:
         """Run one role agent instance. `ticket` is set for ticket-scoped roles."""
@@ -101,7 +103,8 @@ class AgentRunner:
         workspace.mkdir(parents=True, exist_ok=True)
         ctx = ToolContext(jira=self.jira, llm=self.llm, leases=self.leases,
                           settings=self.settings, audit=self.audit, role=role,
-                          ticket=ticket, workspace=workspace, notifier=self.notifier)
+                          ticket=ticket, workspace=workspace, notifier=self.notifier,
+                          metrics=self.metrics)
 
         if ticket:
             try:
@@ -117,6 +120,17 @@ class AgentRunner:
         self.audit.record("dispatch", role=role.role_id, ticket=ticket)
         try:
             await self._loop(ctx, kickoff)
+        except asyncio.CancelledError:
+            # Shutdown / redeploy: release every lease this run holds so the ticket
+            # is free immediately instead of frozen until the stale-lease timeout
+            # (~30 min). This is NOT a failure, so do not bump the retry counter.
+            for key in ([ticket] if ticket else []) + list(ctx.extra_leased):
+                try:
+                    await self.leases.release(key)
+                except Exception:
+                    log.warning("could not release lease on %s during shutdown", key)
+            self.audit.record("agent_cancelled", role=role.role_id, ticket=ticket)
+            raise
         except Exception as e:
             log.exception("agent run %s/%s crashed", role.role_id, ticket)
             self.audit.record("agent_crash", role=role.role_id, ticket=ticket, error=str(e))
@@ -158,7 +172,8 @@ class AgentRunner:
         tools = tools_for_role(role)
 
         for turn in range(self.settings.max_agent_turns):
-            msg = await self.llm.chat(messages, tools=tools, model=role.model)
+            msg = await self.llm.chat(messages, tools=tools, model=role.model,
+                                      role=role.role_id)
             tool_calls = msg.tool_calls or []
             # Serialize only the canonical tool-call shape — model_dump() can carry
             # provider-specific extras that other LiteLLM backends reject on replay.

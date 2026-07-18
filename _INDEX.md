@@ -38,7 +38,10 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 
 ```
 ├── README.md                  # top-level: quick start, Jira prerequisites, human levers, endpoints
+├── OPERATIONS.md              # ops runbook: Prometheus alert rules, circuit-breaker table, per-alert response notes
 ├── _INDEX.md                  # this file
+├── .claude/skills/pr-autopilot/SKILL.md      # dev tooling: sets up the scheduled PR-feedback/feature Routine (not part of the Sentinel runtime)
+├── .claude/skills/issue-autopilot/SKILL.md   # dev tooling: sets up the scheduled highest-priority-issue triage→debrief-or-implement→PR Routine (not part of the Sentinel runtime)
 ├── sentinel/                  # the Python package (~1.9k lines, Python 3.12, asyncio)
 │   ├── __init__.py            # docstring + __version__ ("0.1.0")
 │   ├── server.py              # FastAPI app: /health, /webhook/jira, /sweep; starts the orchestrator loop
@@ -46,12 +49,13 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   ├── agent.py               # AgentRunner: builds system prompts, runs the LLM tool loop, heartbeats
 │   ├── tools.py               # all 19 agent tools + their enforcement logic (the contract layer)
 │   ├── payloads.py            # agent_handoff / rework YAML schema validators + comment extraction
-│   ├── jira.py                # async Jira Server/DC client (httpx); issue-property state keys; attachment up/download
+│   ├── jira.py                # async Jira Server/DC client (httpx); issue-property state keys; attachment up/download; retry/backoff on transient errors
 │   ├── lease.py               # LeaseManager: claim / heartbeat / release / reclaim protocol
-│   ├── llm.py                 # thin AsyncOpenAI wrapper pointed at LiteLLM
+│   ├── llm.py                 # thin AsyncOpenAI wrapper pointed at LiteLLM; tracks call health for /health + per-role token usage for /metrics
 │   ├── notify.py              # outbound alert channel: POST escalations/pause to a webhook (Slack-compatible)
-│   ├── config.py              # env settings + config/pipeline.yml loader (RoleConfig, Settings)
-│   ├── audit.py               # append-only JSONL audit log (thread-locked)
+│   ├── metrics.py             # Prometheus counters + labeled-gauge exposition (served at GET /metrics)
+│   ├── config.py              # env settings + config/pipeline.yml loader (RoleConfig, Settings); validate_config fails fast on a malformed dispatch table
+│   ├── audit.py               # append-only JSONL audit log (thread-locked); size-rotated with retention; queryable via GET /audit
 │   └── doctor.py              # pre-flight CLI: Jira/project/statuses/LiteLLM/role-doc checks
 ├── config/pipeline.yml        # THE dispatch table: role triggers, WIP limits, labels, models, project commands
 ├── docs/                      # role goal documents — these ARE the agents' system prompts
@@ -62,7 +66,7 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   ├── 01-orchestrator.md … 13-rework-router.md   # one doc per role: mission, trigger, procedure, checklist ids, end states
 ├── tests/                     # pytest suite (in-memory fakes, no network)
 │   ├── fakes.py               # FakeJira + FakeLLM (scripted tool-call responses)
-│   ├── test_config.py         # dispatch table ↔ docs pipeline parity, env expansion, required env vars
+│   ├── test_config.py         # dispatch table ↔ docs pipeline parity, env expansion, required env vars, dispatch-table validation (bad trigger/label/condition/wip)
 │   ├── test_payloads.py       # handoff/rejection schema rules, fence extraction ({code} + ```)
 │   ├── test_lease.py          # claim/heartbeat/release/reclaim + staleness boundaries
 │   ├── test_orchestrator.py   # dispatch gating (labels/lease/WIP/retries/waiting), webhook debounce, ORC-5 validation
@@ -72,6 +76,11 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   └── test_run_command.py    # workspace containment (path-aware, not string-prefix)
 │   └── test_attachments.py    # evidence channel: attach_file/get_attachment + containment
 │   └── test_notify.py         # outbound alert channel: payload shape, disabled default, error-swallowing
+│   └── test_jira_retry.py     # transient-failure retry: 429/5xx, transport errors, idempotency, give-up
+│   └── test_audit.py          # audit rotation: size trigger, retention cap, no recent-record loss, disabled mode; read_records filters/generations/malformed-line handling
+│   └── test_server_auth.py    # control-plane auth: header/bearer/query, constant-time, wrong/missing 403, open mode
+│   └── test_metrics.py        # metrics: counter inc/snapshot, Prometheus exposition shape, gauges
+│   └── test_llm.py            # LLM health tracking: consecutive_failures/last_error/last_ok_at + last_error sanitization + per-role/model token-usage accumulation
 ├── conftest.py                # inserts repo root into sys.path (bare `pytest` support)
 ├── Dockerfile                 # python:3.12-slim + git/curl (for shell roles); entrypoint serve|doctor
 ├── docker-compose.yml         # sentinel service (port 8080, docs+config mounted ro, /data volume) + doctor profile
@@ -114,9 +123,30 @@ Jira webhooks ─┐                          ┌─> AgentRunner._loop (LLM too
 1. **`server.py`** loads settings at import, builds `JiraClient`, `LLM`, `AuditLog`,
    `Notifier`, `Orchestrator`; the FastAPI lifespan starts `orchestrator.run_forever()` as a background
    task. Endpoints: `GET /health` (status: starting/paused/ok/degraded — degraded after ≥2
-   consecutive sweep failures, paused while the operator kill-switch is engaged),
-   `POST /webhook/jira?token=…`, `POST /sweep?token=…`, `POST /pause?token=…&reason=…`,
-   `POST /resume?token=…` (all mutating endpoints share the webhook token).
+   consecutive sweep failures **or** ≥3 consecutive LiteLLM failures, paused while the
+   operator kill-switch is engaged),
+   `GET /metrics` (Prometheus counters incremented at dispatch/escalation/reclaim/
+   sweep-failure/transition sites + process gauges + board-backlog gauges — per-status
+   queue depth and needs-human/handoff-invalid counts snapshotted each sweep into
+   `orchestrator.board_state` — plus per-role/model **LLM token-usage counters**
+   (`sentinel_llm_{calls,prompt_tokens,completion_tokens}_total{role,model}`, accumulated
+   passively in `llm.usage_totals` from each successful `LLM.chat(role=…)`; in-memory, so
+   totals reset on restart — scrape with `rate()`) — unauthenticated like `/health`),
+   `GET /audit?ticket=…&event=…&limit=…` (query the audit trail: newest matching records
+   oldest-first across rotated generations via `AuditLog.read_records`; **auth required**
+   unlike `/metrics`, since records carry ticket activity and error strings),
+   `POST /webhook/jira`, `POST /sweep`, `POST /pause?reason=…`, `POST /resume`.
+   `/health` also reports LiteLLM backend health (`llm.consecutive_failures`, tracked
+   passively by `LLM.chat`) and flips to `degraded` after 3 consecutive LLM failures — so a
+   dead LLM backend surfaces instead of reading `ok` while every agent run escalates.
+   `llm.last_error` is **sanitized** (`_safe_error`: exception type + HTTP status only, never
+   the message — which can carry prompts or API-key-bearing headers) since `/health` and
+   `/metrics` are unauthenticated; the warning log uses the same sanitized label (never the
+   raw exception, which would leak the same content into shared log stores). The four
+   mutating endpoints share one guard (`require_auth` → `_authorized`): the `WEBHOOK_SECRET`
+   presented as an `X-Sentinel-Token`/`Authorization: Bearer` header or `?token=` query
+   param, compared **constant-time** (`hmac.compare_digest`); unset secret = open + a
+   startup warning; `/health` is always unauthenticated.
    Webhook handling is fire-and-forget with strong task references (asyncio GC pitfall).
 2. **`orchestrator.py`** — startup retries with backoff (Jira may boot alongside). Every
    `sweep_interval` (900 s) it JQL-searches all agent-owned statuses (ORDER BY updated ASC,
@@ -133,6 +163,26 @@ Jira webhooks ─┐                          ┌─> AgentRunner._loop (LLM too
    the top of `_evaluate_ticket`/`_evaluate_queues`: when engaged, no agent is dispatched and
    no repair side effects run; in-flight runs drain. The flag is persisted to
    `DATA_DIR/pause.json` and reloaded in `start()` so a restart mid-incident stays frozen.
+   The pause also backs the **daily token budget breaker** (`_enforce_token_budget`, run at
+   sweep start and on the webhook fast-path): when `llm.tokens_today` crosses
+   `SENTINEL_LLM_DAILY_TOKEN_BUDGET` (> 0), the pipeline pauses (`by="token-budget"`),
+   `token_budget_pauses_total` increments, and resume is manual (`POST /resume`) — a blown
+   budget signals a runaway, so midnight does not silently restart dispatch.
+   A separate **automatic LLM outage gate** (`_check_llm_gate`, run each sweep) suspends
+   dispatch when `llm.consecutive_failures >= DEGRADED_AFTER` (3, defined in `llm.py`) —
+   dispatching into a dead backend only burns retry budgets and floods `needs-human` —
+   then **probes once per sweep** (`role="llm-probe"`) and lifts itself when a probe
+   succeeds (a gated pipeline makes no LLM calls of its own, so without the probe nothing
+   would ever reset the counter). Alerts `llm_outage`/`llm_recovered`; gauge `llm_gated` +
+   counter `llm_gate_engagements_total`; `llm.gated` in `/health`.
+   Each sweep also runs `_remind_stale_escalations`: any ticket left `needs-human`/
+   `handoff-invalid` and untouched beyond `SENTINEL_STALE_ESCALATION_HOURS` (24 h) is
+   re-alerted via the Notifier, deduped to one reminder per window via `sentinel.reminded`.
+   Sweep housekeeping also enforces the **workspace quota** (`_enforce_workspace_quota`):
+   an idle shell-role workspace over `SENTINEL_WORKSPACE_MAX_BYTES` (> 0) is wiped —
+   sized off the loop without the lock, deleted under the dispatch lock, never while that
+   role has a running agent; audited as `workspace_wiped`, counted in
+   `workspace_wipes_total`. Project commands must tolerate a fresh workspace.
    `_on_status_change` (ORC-5): an **agent** transition without a matching valid
    `agent_handoff` in the last 10 comments ⇒ label `handoff-invalid` + escalate (never
    reverted); a **human** transition is logged and honored (universal rule 6); a clean
@@ -143,6 +193,9 @@ Jira webhooks ─┐                          ┌─> AgentRunner._loop (LLM too
    replay compatibility) → dispatch tools → terminal tool ends the run. Prose without tool
    calls gets a reminder message. Turn cap (80) or crash ⇒ release leases, bump
    `sentinel.retries`, comment; the orchestrator then retries once, then escalates.
+   **Cancellation** (shutdown/redeploy) is a fourth exit: the run releases every lease it
+   holds (own ticket + queue-claimed) *without* bumping retries and re-raises, so a redeploy
+   frees tickets immediately instead of stranding them until the stale-lease timeout.
    A heartbeat task refreshes every held lease (own ticket + queue-claimed) every 600 s;
    a lost lease means a human/orchestrator intervened — stop touching that ticket.
 4. **`tools.py`** — the enforcement layer (see §5). Terminal tools:
@@ -201,6 +254,7 @@ Key enforcement details:
 | `sentinel.waiting` | `{since, reason, role, wake_at}` — parked on a human, wake on activity or timeout (default 24 h) |
 | `sentinel.deployed` | `{<env>: {build, at, by}}` per test/staging/production |
 | `sentinel.retries` | `{count}` — crash/reclaim/turn-cap retries per stage |
+| `sentinel.reminded` | `{at}` — last stale-escalation reminder (dedupes re-alerts per window) |
 
 **`agent_handoff` payload** (validated by `payloads.validate_handoff`): required `role`,
 `ticket`, `timestamp`, `verdict` (pass|reject|escalate), `from_status`, `to_status`;
@@ -241,7 +295,14 @@ Optional: `SENTINEL_DEFAULT_MODEL` (default `gpt-4o`), `SENTINEL_REVIEWER_MODEL`
 `WEBHOOK_SECRET`, `SENTINEL_ALERT_WEBHOOK_URL` (outbound alert webhook; empty = disabled),
 `DATA_DIR` (/data), `DOCS_DIR` (docs), `SENTINEL_CONFIG`
 (config/pipeline.yml), `SENTINEL_SWEEP_INTERVAL` (900), `SENTINEL_LEASE_TIMEOUT` (1800),
-`SENTINEL_HEARTBEAT_INTERVAL` (600), `SENTINEL_MAX_AGENT_TURNS` (80), `SENTINEL_LOG_LEVEL`.
+`SENTINEL_HEARTBEAT_INTERVAL` (600), `SENTINEL_MAX_AGENT_TURNS` (80),
+`SENTINEL_JIRA_MAX_RETRIES` (3), `SENTINEL_AUDIT_MAX_BYTES` (50 MB; 0 = unbounded),
+`SENTINEL_AUDIT_BACKUP_COUNT` (5), `SENTINEL_SHUTDOWN_GRACE` (10),
+`SENTINEL_STALE_ESCALATION_HOURS` (24; 0 = disabled),
+`SENTINEL_WORKSPACE_MAX_BYTES` (0 = disabled; > 0 wipes idle shell-role workspaces past
+this size each sweep),
+`SENTINEL_LLM_DAILY_TOKEN_BUDGET` (0 = disabled; > 0 pauses the pipeline when a UTC day's
+LLM tokens cross it), `SENTINEL_LOG_LEVEL`.
 
 **`config/pipeline.yml`** supports `${VAR}` / `${VAR:default}` expansion (recursive, done
 in `config._expand_env`). Defines: `rework_limit` (2), `split_threshold_points` (8),
@@ -254,6 +315,16 @@ these in is the per-project onboarding step.
 
 `docs/` and `config/` are volume-mounted read-only in compose; edit +
 `docker compose restart sentinel` to apply.
+
+**Static validation (`config.validate_config`, run inside `load_settings`).** After the
+dispatch table is parsed it is checked for the mistakes that would otherwise be *silent*
+at runtime — an unknown `trigger.type` (matches no dispatch path), empty `statuses`, a
+`require_label` that isn't a defined label key (the role waits for a label nobody sets), an
+unknown `condition` or a `condition` on a non-queue role (the gate never applies), two
+ticket roles on one status (nondeterministic dispatch), a `wip_limits` status no role
+watches (limit never enforced). Any problem raises `ConfigError` at startup with **all**
+problems listed, so a bad `pipeline.yml` crashes the container loudly instead of stranding
+tickets in a status with no agent. `doctor` surfaces the same check before it touches Jira.
 
 ## 8. How to run / test / verify
 
@@ -290,7 +361,11 @@ is tested end to end without a model.
 - **Idempotency under retries**: rework counting keys off the rejection comment id;
   a clean stage exit (validated handoff or successful transition) resets `sentinel.retries`.
 - **Fail-safe loop ends**: every agent run ends via exactly one terminal tool, the turn
-  cap, or the crash handler — all three release leases and leave a retry breadcrumb.
+  cap, the crash handler, or cancellation — all release the leases they hold (the crash path
+  also leaves a retry breadcrumb; cancellation does not, since a redeploy is not a failure).
+  On shutdown `orchestrator.stop()` cancels every running agent and waits up to
+  `SENTINEL_SHUTDOWN_GRACE` (10 s) for that cleanup to finish before the Jira client closes,
+  with an idempotent fallback release for ticket-scoped roles.
 - **Escalation is the designed fallback everywhere** (missing commands, missing workflow
   edges, ambiguity, rework loops, repeated crashes): label + comment + freeze, human
   removes the label to resume.
@@ -299,6 +374,16 @@ is tested end to end without a model.
   reasoning-quality layer (8 disciplines + a 5-question self-test) loaded into every agent.
 - Jira **Server/DC v2 API only** (PAT bearer, username-based assignee, `{code}` comment
   macros); search uses POST /search with 50-per-page pagination.
+- **The audit log is bounded**: `audit.py` size-rotates `audit.jsonl` (default 50 MB ×
+  5 generations) so the append-only trail cannot silently fill the `/data` volume it shares
+  with agent workspaces and `pause.json`; rotation itself is best-effort (a failure is
+  logged, never raised into a dispatch/escalation path). `SENTINEL_AUDIT_MAX_BYTES=0` keeps
+  the historical single unbounded file.
+- **Transient Jira failures are absorbed, not surfaced**: `JiraClient._request` retries
+  429/502/503/504 (any method) and network errors (idempotent methods only — a mutating
+  POST is never blindly retried) with capped exponential backoff + jitter, honoring
+  `Retry-After`. A single 429/503 blip therefore does not fail an agent action or count
+  toward the `degraded` sweep-failure threshold. Tunable via `SENTINEL_JIRA_MAX_RETRIES`.
 
 ## 10. Current state & known gaps
 
@@ -310,7 +395,11 @@ is tested end to end without a model.
   `SENTINEL_ALERT_WEBHOOK_URL` is set, `notify.py` pushes escalations and pause/resume to a
   chat webhook (Slack-compatible, best-effort). Richer routing (per-event severity, paging)
   is still expected to be wired downstream of that webhook.
-- No auth on `/health`; webhook/sweep share one token; webhook is plain HTTP in examples.
+- The four mutating endpoints (`/webhook/jira`, `/sweep`, `/pause`, `/resume`) share one
+  `WEBHOOK_SECRET`, now checked **constant-time** and acceptable via header (not just the
+  URL); `/health` is intentionally unauthenticated; transport is still plain HTTP in the
+  examples (terminate TLS at a reverse proxy). An unset secret leaves the endpoints open
+  (with a startup warning).
 - Git history: initial docs (`docs/` first), then the platform build, then a hardening
   series (pagination/GC fixes, agent-loop tests, lease heartbeats for queue claims,
   pre-flight rejection ordering, idempotent rework counting, degraded-health surfacing,
