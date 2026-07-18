@@ -56,7 +56,7 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   ├── metrics.py             # Prometheus counters + labeled-gauge exposition (served at GET /metrics)
 │   ├── config.py              # env settings + config/pipeline.yml loader (RoleConfig, Settings); validate_config fails fast on a malformed dispatch table
 │   ├── audit.py               # append-only JSONL audit log (thread-locked); size-rotated with retention; queryable via GET /audit
-│   └── doctor.py              # pre-flight CLI: Jira/project/statuses/LiteLLM/role-doc checks
+│   └── doctor.py              # readiness-gate CLI: classifies findings BLOCKERS/WARNINGS/INFO (READY: yes|no), --format json, --no-network; commands/docs/Jira/LiteLLM/security
 ├── config/pipeline.yml        # THE dispatch table: role triggers, WIP limits, labels, models, project commands
 ├── docs/                      # role goal documents — these ARE the agents' system prompts
 │   ├── README.md              # loading contract + pointer to the project vision
@@ -81,6 +81,7 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   └── test_server_auth.py    # control-plane auth: header/bearer/query, constant-time, wrong/missing 403, open mode
 │   └── test_metrics.py        # metrics: counter inc/snapshot, Prometheus exposition shape, gauges
 │   └── test_llm.py            # LLM health tracking: consecutive_failures/last_error/last_ok_at + last_error sanitization + per-role/model token-usage accumulation
+│   └── test_doctor.py         # readiness gate: command-blank blockers (role impact), security/reviewer warnings, ready() logic, text/json render, LLM error classification
 ├── conftest.py                # inserts repo root into sys.path (bare `pytest` support)
 ├── Dockerfile                 # python:3.12-slim + git/curl (for shell roles); entrypoint serve|doctor
 ├── docker-compose.yml         # sentinel service (port 8080, docs+config mounted ro, /data volume) + doctor profile
@@ -334,7 +335,8 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt pytest
 .venv/bin/pytest tests -q            # 60+ tests, no network, in-memory fakes
 
 # Pre-flight against real infra (needs .env values exported)
-python -m sentinel.doctor            # checks config, role docs, Jira, statuses, LiteLLM
+python -m sentinel.doctor            # readiness gate: BLOCKERS/WARNINGS/INFO + READY: yes|no
+python -m sentinel.doctor --format json --no-network   # machine-readable, offline classification
 
 # Production
 cp .env.example .env                 # fill in Jira PAT/domain + LiteLLM domain/key
