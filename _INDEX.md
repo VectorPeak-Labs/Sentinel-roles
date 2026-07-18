@@ -53,7 +53,7 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   ├── llm.py                 # thin AsyncOpenAI wrapper pointed at LiteLLM; tracks call health for /health + per-role token usage for /metrics
 │   ├── notify.py              # outbound alert channel: POST escalations/pause to a webhook (Slack-compatible)
 │   ├── metrics.py             # Prometheus counters + labeled-gauge exposition (served at GET /metrics)
-│   ├── config.py              # env settings + config/pipeline.yml loader (RoleConfig, Settings)
+│   ├── config.py              # env settings + config/pipeline.yml loader (RoleConfig, Settings); validate_config fails fast on a malformed dispatch table
 │   ├── audit.py               # append-only JSONL audit log (thread-locked); size-rotated with retention; queryable via GET /audit
 │   └── doctor.py              # pre-flight CLI: Jira/project/statuses/LiteLLM/role-doc checks
 ├── config/pipeline.yml        # THE dispatch table: role triggers, WIP limits, labels, models, project commands
@@ -64,7 +64,7 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   ├── 01-orchestrator.md … 13-rework-router.md   # one doc per role: mission, trigger, procedure, checklist ids, end states
 ├── tests/                     # pytest suite (in-memory fakes, no network)
 │   ├── fakes.py               # FakeJira + FakeLLM (scripted tool-call responses)
-│   ├── test_config.py         # dispatch table ↔ docs pipeline parity, env expansion, required env vars
+│   ├── test_config.py         # dispatch table ↔ docs pipeline parity, env expansion, required env vars, dispatch-table validation (bad trigger/label/condition/wip)
 │   ├── test_payloads.py       # handoff/rejection schema rules, fence extraction ({code} + ```)
 │   ├── test_lease.py          # claim/heartbeat/release/reclaim + staleness boundaries
 │   ├── test_orchestrator.py   # dispatch gating (labels/lease/WIP/retries/waiting), webhook debounce, ORC-5 validation
@@ -313,6 +313,16 @@ these in is the per-project onboarding step.
 
 `docs/` and `config/` are volume-mounted read-only in compose; edit +
 `docker compose restart sentinel` to apply.
+
+**Static validation (`config.validate_config`, run inside `load_settings`).** After the
+dispatch table is parsed it is checked for the mistakes that would otherwise be *silent*
+at runtime — an unknown `trigger.type` (matches no dispatch path), empty `statuses`, a
+`require_label` that isn't a defined label key (the role waits for a label nobody sets), an
+unknown `condition` or a `condition` on a non-queue role (the gate never applies), two
+ticket roles on one status (nondeterministic dispatch), a `wip_limits` status no role
+watches (limit never enforced). Any problem raises `ConfigError` at startup with **all**
+problems listed, so a bad `pipeline.yml` crashes the container loudly instead of stranding
+tickets in a status with no agent. `doctor` surfaces the same check before it touches Jira.
 
 ## 8. How to run / test / verify
 

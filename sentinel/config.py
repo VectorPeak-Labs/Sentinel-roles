@@ -12,6 +12,16 @@ import yaml
 
 _ENV_REF = re.compile(r"\$\{([A-Za-z0-9_]+)(?::([^}]*))?\}")
 
+# Dispatch-table vocabulary the Orchestrator actually understands. A trigger type
+# or condition outside these sets is silently non-functional at runtime, so the
+# validator rejects it at load time (see validate_config).
+KNOWN_TRIGGER_TYPES = frozenset({"ticket", "queue"})
+KNOWN_CONDITIONS = frozenset({"capacity_in_progress", "release_window"})
+
+
+class ConfigError(RuntimeError):
+    """Raised for a malformed pipeline configuration (bad env or dispatch table)."""
+
 
 def _expand_env(value: Any) -> Any:
     """Recursively expand ${VAR} / ${VAR:default} references in a YAML tree."""
@@ -101,6 +111,68 @@ class Settings:
         return list(seen.values())
 
 
+def validate_config(settings: "Settings") -> list[str]:
+    """Static consistency checks on the dispatch table. Returns a list of
+    human-readable problems (empty ⇒ valid).
+
+    Every check here catches a mistake that is otherwise **silent** at runtime —
+    a role that never dispatches, a gate that never applies, a WIP limit that is
+    never enforced — precisely the "nothing silently stuck" class of failure the
+    platform guards against everywhere else, but at the config layer. `load_settings`
+    raises `ConfigError` on any of them so a bad `pipeline.yml` fails loudly at
+    startup instead of quietly stranding tickets in production.
+    """
+    problems: list[str] = []
+    label_keys = set(settings.labels)
+    ticket_owners: dict[str, list[str]] = {}   # status (lower) -> ticket role ids
+
+    for role_id, role in settings.roles.items():
+        if role.trigger_type not in KNOWN_TRIGGER_TYPES:
+            problems.append(
+                f"role '{role_id}': trigger.type '{role.trigger_type}' is not one of "
+                f"{sorted(KNOWN_TRIGGER_TYPES)} — it matches neither dispatch path and "
+                f"would never run")
+        if not role.statuses:
+            problems.append(
+                f"role '{role_id}': trigger.statuses is empty — it watches no status and "
+                f"would never dispatch")
+        if role.require_label and role.require_label not in label_keys:
+            problems.append(
+                f"role '{role_id}': require_label '{role.require_label}' is not a key in "
+                f"labels: {sorted(label_keys)} — the role would wait for a label no human "
+                f"ever applies and never dispatch")
+        if role.condition is not None:
+            if role.condition not in KNOWN_CONDITIONS:
+                problems.append(
+                    f"role '{role_id}': condition '{role.condition}' is not one of "
+                    f"{sorted(KNOWN_CONDITIONS)} — an unrecognized condition is silently "
+                    f"ignored, so the gate you intended would not apply")
+            if role.trigger_type != "queue":
+                problems.append(
+                    f"role '{role_id}': condition '{role.condition}' is only evaluated for "
+                    f"queue roles, but this role is '{role.trigger_type}' — the gate would "
+                    f"be silently ignored")
+        if role.trigger_type == "ticket":
+            for status in role.statuses:
+                ticket_owners.setdefault(status.lower(), []).append(role_id)
+
+    for status_lc, owners in sorted(ticket_owners.items()):
+        if len(owners) > 1:
+            problems.append(
+                f"status '{status_lc}' is watched by multiple ticket roles "
+                f"({sorted(owners)}) — dispatch picks one nondeterministically; give each "
+                f"status a single ticket role")
+
+    watched = {s.lower() for role in settings.roles.values() for s in role.statuses}
+    for status in settings.wip_limits:
+        if status.lower() not in watched:
+            problems.append(
+                f"wip_limits names status '{status}' that no role watches — the limit is "
+                f"never enforced (typo in the status name?)")
+
+    return problems
+
+
 def load_settings(config_path: str | os.PathLike | None = None) -> Settings:
     litellm_url = _require("LITELLM_BASE_URL").rstrip("/")
     if not litellm_url.endswith("/v1"):
@@ -156,5 +228,9 @@ def load_settings(config_path: str | os.PathLike | None = None) -> Settings:
         )
 
     if not settings.roles:
-        raise RuntimeError(f"No roles defined in {path}")
+        raise ConfigError(f"No roles defined in {path}")
+    problems = validate_config(settings)
+    if problems:
+        raise ConfigError(
+            f"Invalid pipeline configuration in {path}:\n  - " + "\n  - ".join(problems))
     return settings
