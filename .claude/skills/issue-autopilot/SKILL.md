@@ -87,8 +87,10 @@ proxy remote. Follow this decision procedure exactly and work exactly ONE issue 
 STEP 0 — Setup:
 - In the clone, `git fetch origin` (it may be stale). Determine the default branch from
   origin/HEAD; cut and target branches against THAT branch, never assume main.
-- Read _INDEX.md and README.md for architecture, invariants, and how to run/test. (Issue bodies may
-  reference docs/PROJECT_VISION.md, which does not exist in this repo — do not rely on it.)
+- Read _INDEX.md and README.md for architecture, invariants, and how to run/test. Also read
+  docs/PROJECT_VISION.md for the project north star; it lives on the `main` branch and may be absent
+  from the default branch you cut from — if it is not in your working tree, read it with
+  `git show origin/main:docs/PROJECT_VISION.md`.
 
 STEP 1 — Select the highest-priority open issue not already in progress:
 - List OPEN issues. Rank by the priority:NN label (lower number = higher priority; priority:01 is
