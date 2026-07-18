@@ -23,7 +23,8 @@ async def main() -> int:
     failures = 0
     try:
         settings = load_settings()
-        print(f"{OK} configuration loaded ({len(settings.roles)} roles)")
+        print(f"{OK} configuration loaded and dispatch table validated "
+              f"({len(settings.roles)} roles)")
     except Exception as e:
         print(f"{FAIL} configuration: {e}")
         return 1
