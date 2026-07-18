@@ -2,6 +2,8 @@
 
 Goal documents for an AI agent loop that drives a Jira-based development workflow. Each pipeline role is defined as one status transition with explicit triggers, exit criteria, end states, and failure paths.
 
+Start with [`PROJECT_VISION.md`](PROJECT_VISION.md) for the product north star: Jira-native, contract-enforced autonomous delivery with explicit human control points.
+
 ## Loading contract
 
 An agent instance is loaded with, in order:
