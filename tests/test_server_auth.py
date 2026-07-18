@@ -134,3 +134,27 @@ def test_audit_endpoint_returns_filtered_records():
 
     out = asyncio.run(srv.audit_query(limit=100, ticket="SENT-77", event="escalation"))
     assert out["count"] == 1 and out["records"][0]["reason"] == "boom"
+
+
+def test_metrics_llm_gauges_healthy():
+    # Pin the Prometheus exposition contract for the LLM health gauges (issue #15):
+    # below the degraded threshold, llm_up reads 1 and the failure count is exact.
+    srv.llm.consecutive_failures = srv.LLM_DEGRADED_AFTER - 1
+    try:
+        out = asyncio.run(srv.prometheus_metrics())
+        assert "sentinel_llm_up 1" in out
+        assert f"sentinel_llm_consecutive_failures {srv.LLM_DEGRADED_AFTER - 1}" in out
+    finally:
+        srv.llm.consecutive_failures = 0         # restore for other tests
+
+
+def test_metrics_llm_gauges_degraded():
+    # At the threshold the same series must flip llm_up to 0 while still
+    # exposing the exact failure count.
+    srv.llm.consecutive_failures = srv.LLM_DEGRADED_AFTER
+    try:
+        out = asyncio.run(srv.prometheus_metrics())
+        assert "sentinel_llm_up 0" in out
+        assert f"sentinel_llm_consecutive_failures {srv.LLM_DEGRADED_AFTER}" in out
+    finally:
+        srv.llm.consecutive_failures = 0         # restore for other tests
