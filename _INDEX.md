@@ -55,7 +55,8 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   └── doctor.py              # pre-flight CLI: Jira/project/statuses/LiteLLM/role-doc checks
 ├── config/pipeline.yml        # THE dispatch table: role triggers, WIP limits, labels, models, project commands
 ├── docs/                      # role goal documents — these ARE the agents' system prompts
-│   ├── README.md              # loading contract: agent = 00 + 00a + own role doc, in that order
+│   ├── README.md              # loading contract + pointer to the project vision
+│   ├── PROJECT_VISION.md      # product north star: Jira-native, contract-enforced autonomous delivery
 │   ├── 00-overview-and-conventions.md   # pipeline table, universal rules, payload schemas, lease/escalation protocols
 │   ├── 00a-operating-manual.md          # reasoning craft: 8 disciplines + 5-question self-test before every handoff
 │   ├── 01-orchestrator.md … 13-rework-router.md   # one doc per role: mission, trigger, procedure, checklist ids, end states
