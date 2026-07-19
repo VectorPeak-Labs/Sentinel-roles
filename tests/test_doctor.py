@@ -76,13 +76,16 @@ def test_only_needed_commands_block(settings):
 def test_missing_webhook_secret_warns(settings):
     report = readiness_findings(settings)
     assert any("WEBHOOK_SECRET is empty" in w for w in report.warnings)
-    assert any("/health is unauthenticated" in w for w in report.warnings)
+    assert any("SENTINEL_ADMIN_TOKEN is empty" in w for w in report.warnings)
+    assert any("/health is unauthenticated by design" in i for i in report.info)
 
 
 def test_webhook_secret_set_no_auth_warning(settings):
     settings.webhook_secret = "s3cret"
+    settings.admin_token = "admin-s3cret"
     report = readiness_findings(settings)
     assert not any("WEBHOOK_SECRET is empty" in w for w in report.warnings)
+    assert not any("SENTINEL_ADMIN_TOKEN is empty" in w for w in report.warnings)
 
 
 # --- reviewer model -------------------------------------------------------- #

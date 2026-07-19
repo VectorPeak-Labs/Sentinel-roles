@@ -127,9 +127,9 @@ Jira webhooks ─┐                          ┌─> AgentRunner._loop (LLM too
 
 1. **`server.py`** loads settings at import, builds `JiraClient`, `LLM`, `AuditLog`,
    `Notifier`, `Orchestrator`; the FastAPI lifespan starts `orchestrator.run_forever()` as a background
-   task. Endpoints: `GET /health` (status: starting/paused/ok/degraded — degraded after ≥2
-   consecutive sweep failures **or** ≥3 consecutive LiteLLM failures, paused while the
-   operator kill-switch is engaged),
+   task. Endpoints: `GET /health` (public minimal liveness: `status` starting/paused/ok/degraded
+   plus `version`; degraded after ≥2 consecutive sweep failures **or** ≥3 consecutive LiteLLM
+   failures, paused while the operator kill-switch is engaged),
    `GET /metrics` (Prometheus counters incremented at dispatch/escalation/reclaim/
    sweep-failure/transition sites + process gauges + board-backlog gauges — per-status
    queue depth and needs-human/handoff-invalid counts snapshotted each sweep into
@@ -138,25 +138,24 @@ Jira webhooks ─┐                          ┌─> AgentRunner._loop (LLM too
    passively in `llm.usage_totals` from each successful `LLM.chat(role=…)`; in-memory, so
    totals reset on restart — scrape with `rate()`) — unauthenticated like `/health`),
    `GET /audit?ticket=…&event=…&role=…&limit=…` (query the audit trail: newest matching records
-   oldest-first across rotated generations via `AuditLog.read_records`; **auth required**
-   unlike `/metrics`, since records carry ticket activity and error strings; the same query is
-   available offline as the `python -m sentinel.audit recent|ticket` CLI),
-   `GET /ops.json` (read-only operator snapshot built by `build_ops_snapshot` from live
+   oldest-first across rotated generations via `AuditLog.read_records`; **admin auth required**
+   since records carry ticket activity and error strings; the same query is available offline
+   as the `python -m sentinel.audit recent|ticket` CLI),
+   `GET /ops.json` (admin-authenticated operator snapshot built by `build_ops_snapshot` from live
    orchestrator state + the last sweep's `board_state` + recent escalations read from the
-   audit trail, reduced to `at`/`event`/`ticket`/`role`; **no secrets**, unauthenticated
-   like `/health`; active/stale lease enumeration deferred — documented in the payload),
+   audit trail, reduced to `at`/`event`/`ticket`/`role`; **no secrets**; active/stale lease
+   enumeration deferred — documented in the payload),
    `POST /webhook/jira`, `POST /sweep`, `POST /pause?reason=…`, `POST /resume`.
-   `/health` also reports LiteLLM backend health (`llm.consecutive_failures`, tracked
-   passively by `LLM.chat`) and flips to `degraded` after 3 consecutive LLM failures — so a
-   dead LLM backend surfaces instead of reading `ok` while every agent run escalates.
+   `/health` still flips to `degraded` from LiteLLM health but does not expose detailed LLM,
+   pause, running-agent, or board fields; those live behind `/ops.json`.
    `llm.last_error` is **sanitized** (`_safe_error`: exception type + HTTP status only, never
-   the message — which can carry prompts or API-key-bearing headers) since `/health` and
-   `/metrics` are unauthenticated; the warning log uses the same sanitized label (never the
-   raw exception, which would leak the same content into shared log stores). The four
-   mutating endpoints share one guard (`require_auth` → `_authorized`): the `WEBHOOK_SECRET`
-   presented as an `X-Sentinel-Token`/`Authorization: Bearer` header or `?token=` query
-   param, compared **constant-time** (`hmac.compare_digest`); unset secret = open + a
-   startup warning; `/health` is always unauthenticated.
+   the message — which can carry prompts or API-key-bearing headers) before it reaches
+   `/ops.json` or `/metrics`; the warning log uses the same sanitized label (never the
+   raw exception, which would leak the same content into shared log stores). Auth is split:
+   `/webhook/jira` uses `WEBHOOK_SECRET`; `/sweep`, `/pause`, `/resume`, `/audit`, and
+   `/ops.json` use `SENTINEL_ADMIN_TOKEN` and fail closed if it is unset. Both guards prefer
+   `Authorization: Bearer` / `X-Sentinel-Token`; `?token=` remains a legacy Jira/development
+   path. Missing credentials return 401, wrong credentials return 403.
    Webhook handling is fire-and-forget with strong task references (asyncio GC pitfall).
 2. **`orchestrator.py`** — startup retries with backoff (Jira may boot alongside). Every
    `sweep_interval` (900 s) it JQL-searches all agent-owned statuses (ORDER BY updated ASC,
@@ -302,7 +301,7 @@ posts an explanatory comment.
 **Environment** (`.env`, see `.env.example`): required `JIRA_BASE_URL`, `JIRA_PAT`,
 `JIRA_PROJECT_KEY`, `LITELLM_BASE_URL` (`/v1` auto-appended), `LITELLM_API_KEY`.
 Optional: `SENTINEL_DEFAULT_MODEL` (default `gpt-4o`), `SENTINEL_REVIEWER_MODEL`,
-`WEBHOOK_SECRET`, `SENTINEL_ALERT_WEBHOOK_URL` (outbound alert webhook; empty = disabled),
+`WEBHOOK_SECRET`, `SENTINEL_ADMIN_TOKEN`, `SENTINEL_ALERT_WEBHOOK_URL` (outbound alert webhook; empty = disabled),
 `DATA_DIR` (/data), `DOCS_DIR` (docs), `SENTINEL_CONFIG`
 (config/pipeline.yml), `SENTINEL_SWEEP_INTERVAL` (900), `SENTINEL_LEASE_TIMEOUT` (1800),
 `SENTINEL_HEARTBEAT_INTERVAL` (600), `SENTINEL_MAX_AGENT_TURNS` (80),
@@ -411,11 +410,14 @@ is tested end to end without a model.
   `SENTINEL_ALERT_WEBHOOK_URL` is set, `notify.py` pushes escalations and pause/resume to a
   chat webhook (Slack-compatible, best-effort). Richer routing (per-event severity, paging)
   is still expected to be wired downstream of that webhook.
-- The four mutating endpoints (`/webhook/jira`, `/sweep`, `/pause`, `/resume`) share one
-  `WEBHOOK_SECRET`, now checked **constant-time** and acceptable via header (not just the
-  URL); `/health` is intentionally unauthenticated; transport is still plain HTTP in the
-  examples (terminate TLS at a reverse proxy). An unset secret leaves the endpoints open
-  (with a startup warning).
+- Endpoint auth has been hardened for the single-container deployment: `/webhook/jira`
+  uses `WEBHOOK_SECRET`, while `/sweep`, `/pause`, `/resume`, `/audit` and `/ops.json`
+  require the separate `SENTINEL_ADMIN_TOKEN` and fail closed if it is unset. Header/Bearer
+  auth is preferred; `?token=` remains as a Jira/development fallback. Missing credentials
+  return 401, wrong credentials return 403. `/health` remains unauthenticated but now exposes
+  only minimal liveness (`status`, `version`); operational detail moved behind `/ops.json`.
+  TLS is still expected at a reverse proxy / private network boundary; the container listens
+  plain HTTP on port 8080.
 - Git history: initial docs (`docs/` first), then the platform build, then a hardening
   series (pagination/GC fixes, agent-loop tests, lease heartbeats for queue claims,
   pre-flight rejection ordering, idempotent rework counting, degraded-health surfacing,

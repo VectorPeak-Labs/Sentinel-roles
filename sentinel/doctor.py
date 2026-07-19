@@ -145,12 +145,15 @@ def readiness_findings(settings: Settings) -> Report:
 
     # Endpoint-security defaults.
     if not settings.webhook_secret:
-        r.warn("WEBHOOK_SECRET is empty — /webhook/jira, /sweep, /pause and /resume are "
-               "UNAUTHENTICATED; set it before exposing the service")
-    r.warn("/health is unauthenticated and may expose operational detail — keep the service "
-           "behind a reverse proxy / private network")
+        r.warn("WEBHOOK_SECRET is empty — /webhook/jira is UNAUTHENTICATED; set it "
+               "before exposing the Jira webhook receiver")
+    if not settings.admin_token:
+        r.warn("SENTINEL_ADMIN_TOKEN is empty — /sweep, /pause, /resume, /audit and "
+               "/ops.json fail closed until it is configured")
+    r.note("/health is unauthenticated by design and returns only minimal liveness "
+           "(status + version); use authenticated /ops.json for operational detail")
     r.note("token auth via ?token= is for Jira webhooks / development only — prefer the "
-           "X-Sentinel-Token or Authorization: Bearer header so it stays out of access logs")
+           "X-Sentinel-Token or Authorization: Bearer *** so it stays out of access logs")
 
     # Confirmations.
     r.note(f"{len(settings.roles)} roles configured and dispatch table validated")

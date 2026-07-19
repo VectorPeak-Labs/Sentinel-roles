@@ -60,6 +60,56 @@ def test_rejects_missing_token():
     assert ok() is False
 
 
+def test_presented_token_prefers_headers_over_legacy_query():
+    assert srv._presented_token("query", "header", None) == "header"
+    assert srv._presented_token("query", None, "Bearer bearer") == "bearer"
+    assert srv._presented_token("query", None, None) == "query"
+
+
+def test_auth_failure_statuses_are_401_missing_and_403_wrong():
+    with pytest.raises(HTTPException) as missing:
+        srv._require_secret(SECRET, token="", x_sentinel_token=None,
+                            authorization=None, realm="webhook")
+    assert missing.value.status_code == 401
+    assert missing.value.headers == {"WWW-Authenticate": "Bearer"}
+
+    with pytest.raises(HTTPException) as wrong:
+        srv._require_secret(SECRET, token="wrong", x_sentinel_token=None,
+                            authorization=None, realm="webhook")
+    assert wrong.value.status_code == 403
+
+
+def test_require_admin_auth_uses_admin_token_not_webhook_secret():
+    original_admin = srv.settings.admin_token
+    original_webhook = srv.settings.webhook_secret
+    srv.settings.admin_token = "admin-secret"
+    srv.settings.webhook_secret = SECRET
+    try:
+        with pytest.raises(HTTPException) as webhook_token:
+            asyncio.run(srv.require_admin_auth(token=SECRET,
+                                               x_sentinel_token=None, authorization=None))
+        assert webhook_token.value.status_code == 403
+        assert asyncio.run(srv.require_admin_auth(token="admin-secret",
+                                                  x_sentinel_token=None,
+                                                  authorization=None)) is None
+    finally:
+        srv.settings.admin_token = original_admin
+        srv.settings.webhook_secret = original_webhook
+
+
+def test_require_admin_auth_fails_closed_when_admin_token_unset():
+    original_admin = srv.settings.admin_token
+    srv.settings.admin_token = ""
+    try:
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(srv.require_admin_auth(token="anything",
+                                               x_sentinel_token=None, authorization=None))
+        assert exc.value.status_code == 503
+        assert "SENTINEL_ADMIN_TOKEN" in exc.value.detail
+    finally:
+        srv.settings.admin_token = original_admin
+
+
 def test_rejects_wrong_length_token_without_error():
     # hmac.compare_digest handles unequal lengths safely (returns False, no raise).
     assert ok(x_sentinel_token=SECRET + "extra") is False
@@ -90,20 +140,25 @@ def test_require_auth_dependency_raises_403_on_bad_token():
         srv.settings.webhook_secret = original
 
 
-def test_health_reports_degraded_when_llm_failing():
+def test_webhook_endpoint_is_marked_webhook_auth_guarded():
+    route = next(r for r in srv.app.routes if getattr(r, "path", None) == "/webhook/jira")
+    assert any(dep.call is srv.require_webhook_auth for dep in route.dependant.dependencies)
+
+
+def test_health_is_minimal_public_liveness_not_detailed_ops():
     srv.orchestrator.agent_user = "bot"          # past 'starting'
     srv.orchestrator.paused = False
     srv.orchestrator.consecutive_sweep_failures = 0
     srv.llm.consecutive_failures = 0
     healthy = asyncio.run(srv.health())
-    assert healthy["status"] == "ok"
-    assert healthy["llm"]["ok"] is True
+    assert healthy == {"status": "ok", "version": srv.__version__}
 
     srv.llm.consecutive_failures = srv.LLM_DEGRADED_AFTER   # backend down
     degraded = asyncio.run(srv.health())
-    assert degraded["status"] == "degraded"
-    assert degraded["llm"]["ok"] is False
-    assert degraded["llm"]["consecutive_failures"] == srv.LLM_DEGRADED_AFTER
+    assert degraded == {"status": "degraded", "version": srv.__version__}
+    assert "llm" not in degraded
+    assert "running_agents" not in degraded
+    assert "pause_reason" not in degraded
     srv.llm.consecutive_failures = 0             # restore for other tests
 
 

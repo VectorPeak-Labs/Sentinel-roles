@@ -28,8 +28,9 @@ prints `READY: yes|no`, exiting non-zero until the deployment is safe and useful
   shell-role command whose role would escalate on first use (e.g. `commands.deploy_production`
   empty → Release role 12 escalates on every release), an unreachable Jira/LiteLLM, or a
   workflow status that does not exist in your Jira.
-- **WARNINGS** — runs, with a known risk: `WEBHOOK_SECRET` empty (mutating endpoints
-  unauthenticated), `/health` exposure, the Code Reviewer sharing the default model.
+- **WARNINGS** — runs, with a known risk: `WEBHOOK_SECRET` empty (Jira webhook
+  receiver unauthenticated), `SENTINEL_ADMIN_TOKEN` empty (admin endpoints fail closed
+  until configured), the Code Reviewer sharing the default model.
 - **INFO** — confirmations (roles loaded, statuses found, default model, Jira project
   permissions verified non-mutatingly via `/mypermissions`).
 
@@ -77,8 +78,9 @@ python -m sentinel.onboard --run-doctor # write, then run doctor against the new
    `Client Review Accepted`, `Rework`, `Done`.
 3. **Webhook** (optional but recommended — the 15-minute sweep works without it):
    Jira admin → System → WebHooks → URL
-   `http://<sentinel-host>:8080/webhook/jira?token=<WEBHOOK_SECRET>`, events: issue
-   created/updated + comment created, JQL filter `project = <YOUR_KEY>`.
+   `https://<sentinel-host>/webhook/jira?token=<WEBHOOK_SECRET>`, events: issue
+   created/updated + comment created, JQL filter `project = <YOUR_KEY>`. Terminate TLS at
+   your reverse proxy if Sentinel itself listens on container port 8080.
 
 ### Day-to-day operation (the human levers)
 
@@ -102,14 +104,19 @@ incident, a bad model rollout, a maintenance window — use the pause control in
 labelling every ticket or killing the container:
 
 ```bash
-curl -X POST "http://<sentinel-host>:8080/pause?token=<WEBHOOK_SECRET>&reason=incident-1234"
-curl -X POST "http://<sentinel-host>:8080/resume?token=<WEBHOOK_SECRET>"
+curl -X POST \
+  -H "Authorization: Bearer <SENTINEL_ADMIN_TOKEN>" \
+  "https://<sentinel-host>/pause?reason=incident-1234"
+curl -X POST \
+  -H "Authorization: Bearer <SENTINEL_ADMIN_TOKEN>" \
+  "https://<sentinel-host>/resume"
 ```
 
 While paused the Orchestrator dispatches no new agents (ticket or queue); agents already
 running **drain to completion** rather than being killed mid-transition. The pause is
 persisted to `DATA_DIR/pause.json`, so a container restart during an incident stays frozen
-until you explicitly `/resume`. `GET /health` reports `"status": "paused"` with the reason.
+until you explicitly `/resume`. `GET /health` reports `"status": "paused"`; the authenticated
+`GET /ops.json` includes the pause reason and timestamp.
 
 The pause also backs a **daily LLM token budget** (circuit breaker for cost): set
 `SENTINEL_LLM_DAILY_TOKEN_BUDGET` and the Orchestrator pauses the pipeline the moment a UTC
@@ -117,14 +124,14 @@ day's total token consumption crosses it (checked every sweep **and** on the web
 fast-path), with a `pipeline_paused` alert naming the spend. Resume is deliberately manual —
 a blown budget means something ran away (a rework loop, a chatty prompt), not that midnight
 fixes it. `0` (default) disables. Watch it via `sentinel_llm_tokens_today` /
-`sentinel_llm_daily_token_budget` on `/metrics` or the `llm` block of `/health`.
+`sentinel_llm_daily_token_budget` on `/metrics` or the `llm` block of authenticated `/ops.json`.
 
 A third, fully **automatic** breaker covers LLM outages: after 3 consecutive failed LLM
 calls the Orchestrator stops dispatching (each dispatch would just crash on its first chat
 call, burn the ticket's retry budget and flood the board with spurious `needs-human`),
 fires an `llm_outage` alert, and **probes the backend once per sweep** — the moment a probe
 succeeds the gate lifts itself and an `llm_recovered` alert fires. No operator action
-needed for transient outages; `/health` shows `llm.gated` and `/metrics` exposes
+needed for transient outages; authenticated `/ops.json` shows `llm.gated` and `/metrics` exposes
 `sentinel_llm_gated` + `sentinel_llm_gate_engagements_total`.
 
 ## How it works
@@ -212,24 +219,27 @@ value to `0` to disable the reminders.
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /health` | liveness + pause state + LiteLLM health + currently running agents (no auth) |
-| `GET /ops.json` | operator status snapshot: status, pause/degraded, running agents, board backlog (last sweep), recent escalations (no auth, no secrets) |
-| `GET /metrics` | Prometheus metrics: dispatch/escalation/reclaim/sweep-failure counters + live gauges (no auth) |
+| `GET /health` | public minimal liveness: `status` + `version` only |
+| `GET /ops.json` | authenticated operator status snapshot: status, pause/degraded, running agents, board backlog (last sweep), recent escalations |
+| `GET /metrics` | Prometheus metrics: dispatch/escalation/reclaim/sweep-failure counters + live gauges (no app auth; scrape on trusted networks or at the proxy) |
 | `GET /audit?ticket=…&event=…&role=…&limit=…` | query the audit trail (newest matching records, across rotated generations; auth required; also `python -m sentinel.audit`) |
 | `POST /webhook/jira` | Jira webhook receiver |
 | `POST /sweep` | force an immediate board sweep |
 | `POST /pause?reason=…` | freeze all dispatch (in-flight runs drain); survives restart |
 | `POST /resume` | lift the pause and resume dispatching |
 
-`GET /ops.json` returns a single read-only JSON snapshot for humans and light automation —
+`GET /health` is intentionally public and minimal: it returns only `status` and `version`,
+so load balancers can perform unauthenticated liveness checks without exposing pause reasons,
+LLM errors, running agents, or board state.
+
+`GET /ops.json` returns a single authenticated read-only JSON snapshot for humans and light automation —
 `status` (starting/ok/paused/degraded, same roll-up as `/health`), a `pause` block
 (reason + timestamp), a `sweep` block (last time, last error, failure count), `llm` health,
 `running_agents`, the `board` backlog from the last sweep (per-status queue depth plus
 `needs_human` / `handoff_invalid` counts, as of `board.sampled_at`), and `recent_escalations`
 (the newest `escalation` / `orchestrator_escalation` / `stale_escalation_reminder` events,
 reduced to `at`/`event`/`ticket`/`role`). It reuses the sweep snapshot rather than hitting
-Jira, returns **no secrets**, and (like `/health` and `/metrics`) is **unauthenticated** — keep
-it on a trusted network or behind a reverse proxy until endpoint auth is added. Active/stale
+Jira, returns **no secrets**, and requires the `SENTINEL_ADMIN_TOKEN`; active/stale
 lease enumeration is intentionally deferred (leases live in Jira issue properties; reading them
 all is an unbounded scan) — use `needs_human`, `recent_escalations`, and `GET /audit` instead.
 
@@ -248,12 +258,16 @@ these make per-role consumption and runaway loops visible; totals reset on resta
 spikes, sustained sweep failures, a growing Rework/To-Do backlog, escalations left
 unresolved (`needs_human_tickets > 0` for too long), or an abnormal token-burn rate.
 
-The four `POST` endpoints can freeze or nudge the whole pipeline, so they require the
-`WEBHOOK_SECRET`. Present it as an `X-Sentinel-Token: <secret>` header, an
-`Authorization: Bearer <secret>` header (both keep it out of URLs and access logs), or a
-`?token=<secret>` query param (Jira webhooks can only put it in the URL). The check is
-constant-time. If `WEBHOOK_SECRET` is unset the endpoints are **open** and Sentinel logs a
-startup warning — set it in production. `GET /health` is always unauthenticated (liveness).
+The Jira webhook receiver requires `WEBHOOK_SECRET`; the operator/admin endpoints
+(`/sweep`, `/pause`, `/resume`, `/audit`, `/ops.json`) require the separate
+`SENTINEL_ADMIN_TOKEN`. Present tokens as an `Authorization: Bearer <token>` header or
+`X-Sentinel-Token: <token>` header to keep them out of URLs/access logs. The legacy
+`?token=<secret>` query param remains supported for Jira webhooks and development tools, but
+operator examples intentionally avoid it. Missing credentials return `401` with
+`WWW-Authenticate: Bearer`; incorrect credentials return `403`; if `SENTINEL_ADMIN_TOKEN` is
+unset, admin endpoints fail closed with `503` until configured. `GET /health` stays public
+because its payload is minimal liveness only. Terminate TLS at a reverse proxy and keep the
+service on a private/trusted network where possible.
 
 Audit trail: `docker compose exec sentinel tail -f /data/audit.jsonl` — every dispatch,
 transition, reclaim and escalation (mirrored to Jira comments where the docs require it).

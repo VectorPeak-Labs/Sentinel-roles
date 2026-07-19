@@ -61,9 +61,21 @@ LLM_DEGRADED_AFTER = llm_degraded_after
 app = FastAPI(title="Sentinel", version=__version__, lifespan=lifespan)
 
 if not settings.webhook_secret:
-    log.warning("WEBHOOK_SECRET is not set — /webhook/jira, /sweep, /pause and /resume "
-                "are UNAUTHENTICATED. Anyone who can reach this port can freeze the "
-                "pipeline. Set WEBHOOK_SECRET in production.")
+    log.warning("WEBHOOK_SECRET is not set — /webhook/jira is UNAUTHENTICATED. "
+                "Set WEBHOOK_SECRET before exposing the Jira webhook receiver.")
+if not settings.admin_token:
+    log.warning("SENTINEL_ADMIN_TOKEN is not set — /sweep, /pause, /resume, "
+                "/audit and /ops.json fail closed until an admin token is configured.")
+
+
+def _presented_token(token: str, x_sentinel_token: str | None,
+                     authorization: str | None) -> str:
+    """Return the first presented credential, preferring headers over legacy query auth."""
+    if x_sentinel_token:
+        return x_sentinel_token
+    if authorization and authorization[:7].lower() == "bearer ":
+        return authorization[7:].strip()
+    return token or ""
 
 
 def _authorized(secret: str, token: str, x_sentinel_token: str | None,
@@ -71,30 +83,55 @@ def _authorized(secret: str, token: str, x_sentinel_token: str | None,
     """Constant-time check of a presented secret against the configured one.
 
     The secret may arrive as the `X-Sentinel-Token` header, an
-    `Authorization: Bearer <token>` header (both keep it out of URLs and access
-    logs), or the `token` query param (Jira webhooks can only put it in the URL).
-    An empty configured secret means the endpoints are open (documented mode).
+    `Authorization: Bearer ...` header, or the legacy `token` query param.
+    An empty configured webhook secret means the webhook receiver is open
+    (documented dev mode); admin endpoints use a separate fail-closed guard.
     """
     if not secret:
         return True
-    presented = ""
-    if x_sentinel_token:
-        presented = x_sentinel_token
-    elif authorization and authorization[:7].lower() == "bearer ":
-        presented = authorization[7:].strip()
-    elif token:
-        presented = token
+    presented = _presented_token(token, x_sentinel_token, authorization)
     return bool(presented) and hmac.compare_digest(presented, secret)
 
 
-async def require_auth(
+def _require_secret(secret: str, *, token: str, x_sentinel_token: str | None,
+                    authorization: str | None, realm: str) -> None:
+    """Raise HTTP 401 for absent credentials and 403 for incorrect credentials."""
+    presented = _presented_token(token, x_sentinel_token, authorization)
+    if not presented:
+        raise HTTPException(status_code=401, detail=f"missing {realm} token",
+                            headers={"WWW-Authenticate": "Bearer"})
+    if not secret or not hmac.compare_digest(presented, secret):
+        raise HTTPException(status_code=403, detail="bad token")
+
+
+async def require_webhook_auth(
     token: str = "",
     x_sentinel_token: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
 ) -> None:
-    """FastAPI dependency guarding the mutating endpoints (constant-time)."""
+    """FastAPI dependency guarding only the Jira webhook receiver."""
     if not _authorized(settings.webhook_secret, token, x_sentinel_token, authorization):
-        raise HTTPException(status_code=403, detail="bad token")
+        _require_secret(settings.webhook_secret, token=token,
+                        x_sentinel_token=x_sentinel_token,
+                        authorization=authorization, realm="webhook")
+
+
+async def require_admin_auth(
+    token: str = "",
+    x_sentinel_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> None:
+    """FastAPI dependency for admin/operator endpoints; fails closed if unset."""
+    if not settings.admin_token:
+        raise HTTPException(status_code=503,
+                            detail="SENTINEL_ADMIN_TOKEN is not configured")
+    _require_secret(settings.admin_token, token=token,
+                    x_sentinel_token=x_sentinel_token,
+                    authorization=authorization, realm="admin")
+
+
+# Backwards-compatible name for tests/importers that only mean webhook auth.
+require_auth = require_webhook_auth
 
 
 # Strong references to fire-and-forget tasks: asyncio only keeps weak refs to
@@ -176,45 +213,19 @@ def build_ops_snapshot(orch, cfg, llm_client, recent_escalations: list[dict],
 
 @app.get("/health")
 async def health() -> dict:
+    """Public liveness probe with a deliberately minimal, non-sensitive payload."""
     llm_ok = llm.consecutive_failures < LLM_DEGRADED_AFTER
     status = _overall_status(orchestrator, llm_ok)
-    return {
-        "status": status,
-        "version": __version__,
-        "agent_user": orchestrator.agent_user,
-        "paused": orchestrator.paused,
-        "paused_at": orchestrator.paused_at,
-        "pause_reason": orchestrator.pause_reason,
-        "last_sweep_at": orchestrator.last_sweep_at,
-        "last_sweep_error": orchestrator.last_sweep_error,
-        "consecutive_sweep_failures": orchestrator.consecutive_sweep_failures,
-        "sweep_count": orchestrator.sweep_count,
-        "pending_webhook_evaluations": len(orchestrator._pending_keys),
-        "llm": {
-            "ok": llm_ok,
-            "gated": orchestrator.llm_gated,
-            "consecutive_failures": llm.consecutive_failures,
-            "last_error": llm.last_error,
-            "last_ok_at": llm.last_ok_at,
-            "tokens_today": llm.tokens_in_current_window(),
-            "daily_token_budget": settings.llm_daily_token_budget,
-        },
-        "running_agents": [
-            {"role": role_id, "ticket": ticket}
-            for (role_id, ticket) in orchestrator.running
-        ],
-    }
+    return {"status": status, "version": __version__}
 
 
 @app.get("/ops.json")
-async def ops_status() -> dict:
-    """Read-only operational snapshot for operators: overall status, pause/degraded
-    state, running agents, the board backlog from the last sweep (per-status depth +
-    needs-human / handoff-invalid counts), and the most recent escalations from the
-    audit trail. No secrets are returned; it is unauthenticated like /health and
-    /metrics — keep it on a trusted network / behind a reverse proxy (endpoint auth
-    hardening is tracked separately). Board figures are as of `board.sampled_at` (the
-    last sweep), not live, to avoid extra Jira load."""
+async def ops_status(_: None = Depends(require_admin_auth)) -> dict:
+    """Authenticated operational snapshot for operators: overall status,
+    pause/degraded state, running agents, the board backlog from the last sweep
+    (per-status depth + needs-human / handoff-invalid counts), and the most
+    recent escalations from the audit trail. No secrets are returned, but it
+    carries enough operational detail to require the admin token."""
     records = await asyncio.to_thread(audit.read_records, 200)
     return build_ops_snapshot(orchestrator, settings, llm, _recent_escalations(records))
 
@@ -279,7 +290,7 @@ async def prometheus_metrics() -> str:
 
 
 @app.post("/webhook/jira")
-async def jira_webhook(request: Request, _: None = Depends(require_auth)) -> dict:
+async def jira_webhook(request: Request, _: None = Depends(require_webhook_auth)) -> dict:
     try:
         event = await request.json()
     except Exception:
@@ -291,7 +302,7 @@ async def jira_webhook(request: Request, _: None = Depends(require_auth)) -> dic
 
 @app.get("/audit")
 async def audit_query(limit: int = 100, ticket: str = "", event: str = "",
-                      role: str = "", _: None = Depends(require_auth)) -> dict:
+                      role: str = "", _: None = Depends(require_admin_auth)) -> dict:
     """Query the audit trail: the newest matching records, oldest-first, across
     all retained rotation generations. Filters: ?ticket=SENT-42, ?event=dispatch,
     ?role=07-implementer, ?limit=N (max 1000). Auth-guarded like the mutating
@@ -306,18 +317,18 @@ async def audit_query(limit: int = 100, ticket: str = "", event: str = "",
 
 
 @app.post("/sweep")
-async def trigger_sweep(_: None = Depends(require_auth)) -> dict:
-    """Manually trigger a board sweep (same auth as the webhook)."""
+async def trigger_sweep(_: None = Depends(require_admin_auth)) -> dict:
+    """Manually trigger a board sweep (admin auth)."""
     _spawn_background(orchestrator.sweep())
     return {"sweeping": True}
 
 
 @app.post("/pause")
-async def pause(reason: str = "", _: None = Depends(require_auth)) -> dict:
+async def pause(reason: str = "", _: None = Depends(require_admin_auth)) -> dict:
     """Freeze the pipeline: stop dispatching new agents (in-flight runs drain).
 
     The freeze is persisted, so a container restart stays paused until /resume.
-    Same auth as the webhook.
+    Requires the separate Sentinel admin token.
     """
     await orchestrator.pause(reason=reason, by="api")
     return {"paused": True, "reason": orchestrator.pause_reason,
@@ -325,7 +336,7 @@ async def pause(reason: str = "", _: None = Depends(require_auth)) -> dict:
 
 
 @app.post("/resume")
-async def resume(_: None = Depends(require_auth)) -> dict:
+async def resume(_: None = Depends(require_admin_auth)) -> dict:
     """Lift a pause and resume dispatching on the next sweep/webhook."""
     await orchestrator.resume(by="api")
     return {"paused": False}
