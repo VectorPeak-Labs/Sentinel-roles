@@ -24,6 +24,29 @@ docker compose up -d --build
 `doctor` verifies connectivity and that every pipeline status exists in your Jira workflow
 before anything runs.
 
+### Guided onboarding
+
+New to Sentinel? Instead of hand-editing `.env` and `config/pipeline.yml`, run the guided
+setup — it walks you through Jira, LiteLLM, and the per-project shell commands, then writes
+both files for you:
+
+```bash
+python -m sentinel.onboard              # interactive; prompts for each field
+python -m sentinel.onboard --dry-run    # preview what it would write, touch nothing
+python -m sentinel.onboard --run-doctor # write, then run doctor against the new config
+```
+
+- **Secrets are never printed** — the PAT, LiteLLM key, and webhook secret are read without
+  echo and only shown masked in the summary.
+- It's **non-destructive**: an existing `.env` is not overwritten without `--force`, and
+  `--dry-run` writes nothing. `config/pipeline.yml` is updated in place with your commands,
+  preserving its comments (so the change is easy to diff).
+- For any project command you leave blank it tells you **exactly which role will escalate**
+  (e.g. an empty `deploy_production` means Release role 12 escalates on every release) — the
+  same safe "never guess a deploy command" behavior, made explicit up front.
+- `--non-interactive` takes values from the environment (`SENTINEL_CMD_<NAME>` for commands),
+  for scripted/CI setup and dry-run checks.
+
 ### Jira prerequisites
 
 1. **PAT**: create a Personal Access Token for a dedicated Jira service account (Jira

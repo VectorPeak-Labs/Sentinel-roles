@@ -56,7 +56,8 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   ├── metrics.py             # Prometheus counters + labeled-gauge exposition (served at GET /metrics)
 │   ├── config.py              # env settings + config/pipeline.yml loader (RoleConfig, Settings); validate_config fails fast on a malformed dispatch table
 │   ├── audit.py               # append-only JSONL audit log (thread-locked); size-rotated with retention; queryable via GET /audit
-│   └── doctor.py              # pre-flight CLI: Jira/project/statuses/LiteLLM/role-doc checks
+│   ├── doctor.py              # pre-flight CLI: Jira/project/statuses/LiteLLM/role-doc checks
+│   └── onboard.py             # guided setup CLI: writes .env (from .env.example) + fills pipeline.yml commands; secrets never printed
 ├── config/pipeline.yml        # THE dispatch table: role triggers, WIP limits, labels, models, project commands
 ├── docs/                      # role goal documents — these ARE the agents' system prompts
 │   ├── README.md              # loading contract + pointer to the project vision
@@ -81,6 +82,7 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   └── test_server_auth.py    # control-plane auth: header/bearer/query, constant-time, wrong/missing 403, open mode
 │   └── test_metrics.py        # metrics: counter inc/snapshot, Prometheus exposition shape, gauges
 │   └── test_llm.py            # LLM health tracking: consecutive_failures/last_error/last_ok_at + last_error sanitization + per-role/model token-usage accumulation
+│   └── test_onboard.py        # onboarding: env/config rendering + comment preservation, secrets-never-printed, blank-command warnings, dry-run, generated config loads
 ├── conftest.py                # inserts repo root into sys.path (bare `pytest` support)
 ├── Dockerfile                 # python:3.12-slim + git/curl (for shell roles); entrypoint serve|doctor
 ├── docker-compose.yml         # sentinel service (port 8080, docs+config mounted ro, /data volume) + doctor profile
@@ -311,7 +313,11 @@ require_label/condition, `shell`, `model`, `estimators`, `min_interval_seconds`)
 **`commands:`** — project-specific clone/test/deploy_test/deploy_staging/deploy_production/
 smoke_test/rollback strings injected into shell-role prompts. **All command strings are
 empty by default; shell roles escalate with `needs-human` rather than guess** — filling
-these in is the per-project onboarding step.
+these in is the per-project onboarding step, which `sentinel/onboard.py` guides
+(`python -m sentinel.onboard`): it writes `.env` from `.env.example` and fills the
+`commands:` block in place (comment-preserving), reads secrets without echo and never prints
+them, warns which role escalates for each blank command, and can hand off to `doctor`.
+`--dry-run` writes nothing; an existing `.env` needs `--force` to overwrite.
 
 `docs/` and `config/` are volume-mounted read-only in compose; edit +
 `docker compose restart sentinel` to apply.
@@ -337,7 +343,8 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt pytest
 python -m sentinel.doctor            # checks config, role docs, Jira, statuses, LiteLLM
 
 # Production
-cp .env.example .env                 # fill in Jira PAT/domain + LiteLLM domain/key
+python -m sentinel.onboard           # guided: writes .env + fills pipeline.yml commands
+#   (or hand-edit) cp .env.example .env  # fill in Jira PAT/domain + LiteLLM domain/key
 docker compose run --rm doctor
 docker compose up -d --build
 docker compose exec sentinel tail -f /data/audit.jsonl   # audit trail
@@ -390,7 +397,7 @@ is tested end to end without a model.
 - Version 0.1.0; single project key per deployment; one container, no horizontal scaling
   (concurrency is per-status WIP limits inside one asyncio process).
 - `commands:` in `pipeline.yml` are intentionally blank — the platform is generic until a
-  project fills them in.
+  project fills them in; `python -m sentinel.onboard` guides that first-run setup.
 - Notifications: Jira comments + `needs-human` label are always written; additionally, if
   `SENTINEL_ALERT_WEBHOOK_URL` is set, `notify.py` pushes escalations and pause/resume to a
   chat webhook (Slack-compatible, best-effort). Richer routing (per-event severity, paging)
