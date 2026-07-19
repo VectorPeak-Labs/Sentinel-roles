@@ -44,7 +44,7 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 ├── .claude/skills/issue-autopilot/SKILL.md   # dev tooling: sets up the scheduled highest-priority-issue triage→debrief-or-implement→PR Routine (not part of the Sentinel runtime)
 ├── sentinel/                  # the Python package (~1.9k lines, Python 3.12, asyncio)
 │   ├── __init__.py            # docstring + __version__ ("0.1.0")
-│   ├── server.py              # FastAPI app: /health, /webhook/jira, /sweep; starts the orchestrator loop
+│   ├── server.py              # FastAPI app: /health, /ops.json (operator snapshot), /metrics, /audit, /webhook/jira, /sweep, /pause, /resume; starts the orchestrator loop
 │   ├── orchestrator.py        # role 01: sweep + webhook dispatch, leases, WIP, loop-breaker, handoff audit
 │   ├── agent.py               # AgentRunner: builds system prompts, runs the LLM tool loop, heartbeats
 │   ├── tools.py               # all 19 agent tools + their enforcement logic (the contract layer)
@@ -83,6 +83,7 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   └── test_metrics.py        # metrics: counter inc/snapshot, Prometheus exposition shape, gauges
 │   └── test_llm.py            # LLM health tracking: consecutive_failures/last_error/last_ok_at + last_error sanitization + per-role/model token-usage accumulation
 │   └── test_onboard.py        # onboarding: env/config rendering + comment preservation, secrets-never-printed, blank-command warnings, dry-run, generated config loads
+│   └── test_ops.py            # GET /ops.json: status roll-up, snapshot shape + no-secrets, recent-escalation filter/sanitize/limit, idle-endpoint smoke
 ├── conftest.py                # inserts repo root into sys.path (bare `pytest` support)
 ├── Dockerfile                 # python:3.12-slim + git/curl (for shell roles); entrypoint serve|doctor
 ├── docker-compose.yml         # sentinel service (port 8080, docs+config mounted ro, /data volume) + doctor profile
@@ -137,6 +138,10 @@ Jira webhooks ─┐                          ┌─> AgentRunner._loop (LLM too
    `GET /audit?ticket=…&event=…&limit=…` (query the audit trail: newest matching records
    oldest-first across rotated generations via `AuditLog.read_records`; **auth required**
    unlike `/metrics`, since records carry ticket activity and error strings),
+   `GET /ops.json` (read-only operator snapshot built by `build_ops_snapshot` from live
+   orchestrator state + the last sweep's `board_state` + recent escalations read from the
+   audit trail, reduced to `at`/`event`/`ticket`/`role`; **no secrets**, unauthenticated
+   like `/health`; active/stale lease enumeration deferred — documented in the payload),
    `POST /webhook/jira`, `POST /sweep`, `POST /pause?reason=…`, `POST /resume`.
    `/health` also reports LiteLLM backend health (`llm.consecutive_failures`, tracked
    passively by `LLM.chat`) and flips to `degraded` after 3 consecutive LLM failures — so a
