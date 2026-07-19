@@ -324,13 +324,17 @@ def main(argv: list[str] | None = None) -> int:
         env_values, commands, run_doctor = collect_interactive()
         run_doctor = run_doctor or args.run_doctor
         if not args.dry_run:
-            # The operator is actively driving this; a final confirm authorizes
-            # overwriting the tracked config/pipeline.yml.
+            # A final confirm authorizes writing. It updates config/pipeline.yml
+            # (an intended, comment-preserving update), but must NOT silently
+            # clobber a secret-bearing .env — overwriting an existing one needs
+            # --force or its own dedicated confirmation.
             proceed = _prompt("Write these files now? [y/N]", default="n").lower()
             if not proceed.startswith("y"):
                 args.dry_run = True
-            else:
-                force = True
+            elif (root / ".env").exists() and not force:
+                overwrite = _prompt("An .env already exists. Overwrite it? [y/N]",
+                                    default="n").lower()
+                force = overwrite.startswith("y")
 
     result = run_onboarding(env_values=env_values, commands=commands, root=root,
                             dry_run=args.dry_run, force=force)

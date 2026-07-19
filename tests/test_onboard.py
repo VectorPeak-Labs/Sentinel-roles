@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import sentinel.onboard as onboard
 from sentinel.config import load_settings
 from sentinel.onboard import (
     COMMAND_KEYS,
@@ -244,3 +245,50 @@ def test_non_interactive_main_dry_run(tmp_path, monkeypatch, capsys):
     assert "[dry-run] no files written." in out
     # deploy_production was not provided -> its escalation warning shows.
     assert "commands.deploy_production is empty" in out
+
+
+# --- interactive main does not clobber an existing .env -------------------- #
+
+def test_interactive_main_keeps_existing_env_without_force(tmp_path, monkeypatch):
+    # Regression: the generic "Write these files now?" confirm must NOT overwrite
+    # an existing .env — that is what --force / a dedicated confirm is for.
+    _seed_repo(tmp_path)
+    (tmp_path / ".env").write_text("EXISTING=secret\n")
+    monkeypatch.setattr(onboard, "collect_interactive",
+                        lambda **kw: ({"JIRA_BASE_URL": "https://j"},
+                                      {"clone": "git clone https://x ."}, False))
+    # main() prompts: "Write these files now?" -> y ; "...Overwrite it?" -> n
+    replies = iter(["y", "n"])
+    monkeypatch.setattr(onboard, "_prompt", lambda *a, **k: next(replies))
+
+    rc = onboard.main(["--root", str(tmp_path)])
+    assert rc == 0
+    # .env preserved; config still updated in place.
+    assert (tmp_path / ".env").read_text() == "EXISTING=secret\n"
+    assert 'clone: "git clone https://x ."' in (tmp_path / "config" / "pipeline.yml").read_text()
+
+
+def test_interactive_main_overwrites_env_when_confirmed(tmp_path, monkeypatch):
+    _seed_repo(tmp_path)
+    (tmp_path / ".env").write_text("EXISTING=secret\n")
+    monkeypatch.setattr(onboard, "collect_interactive",
+                        lambda **kw: ({"JIRA_BASE_URL": "https://jira"}, {}, False))
+    replies = iter(["y", "y"])  # write? yes ; overwrite existing .env? yes
+    monkeypatch.setattr(onboard, "_prompt", lambda *a, **k: next(replies))
+
+    rc = onboard.main(["--root", str(tmp_path)])
+    assert rc == 0
+    assert "JIRA_BASE_URL=https://jira" in (tmp_path / ".env").read_text()
+
+
+def test_interactive_main_new_env_written_without_prompt(tmp_path, monkeypatch):
+    # No pre-existing .env -> no overwrite question, .env is written on "yes".
+    _seed_repo(tmp_path)
+    monkeypatch.setattr(onboard, "collect_interactive",
+                        lambda **kw: ({"JIRA_BASE_URL": "https://jira"}, {}, False))
+    replies = iter(["y"])  # only "Write these files now?" is asked
+    monkeypatch.setattr(onboard, "_prompt", lambda *a, **k: next(replies))
+
+    rc = onboard.main(["--root", str(tmp_path)])
+    assert rc == 0
+    assert "JIRA_BASE_URL=https://jira" in (tmp_path / ".env").read_text()
