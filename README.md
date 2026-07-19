@@ -41,6 +41,29 @@ python -m sentinel.doctor --no-network    # config/command/security readiness on
 
 Fix every **BLOCKER** before `docker compose up`; review **WARNINGS** for your deployment.
 
+### Guided onboarding
+
+New to Sentinel? Instead of hand-editing `.env` and `config/pipeline.yml`, run the guided
+setup — it walks you through Jira, LiteLLM, and the per-project shell commands, then writes
+both files for you:
+
+```bash
+python -m sentinel.onboard              # interactive; prompts for each field
+python -m sentinel.onboard --dry-run    # preview what it would write, touch nothing
+python -m sentinel.onboard --run-doctor # write, then run doctor against the new config
+```
+
+- **Secrets are never printed** — the PAT, LiteLLM key, and webhook secret are read without
+  echo and only shown masked in the summary.
+- It's **non-destructive**: an existing `.env` is not overwritten without `--force`, and
+  `--dry-run` writes nothing. `config/pipeline.yml` is updated in place with your commands,
+  preserving its comments (so the change is easy to diff).
+- For any project command you leave blank it tells you **exactly which role will escalate**
+  (e.g. an empty `deploy_production` means Release role 12 escalates on every release) — the
+  same safe "never guess a deploy command" behavior, made explicit up front.
+- `--non-interactive` takes values from the environment (`SENTINEL_CMD_<NAME>` for commands),
+  for scripted/CI setup and dry-run checks.
+
 ### Jira prerequisites
 
 1. **PAT**: create a Personal Access Token for a dedicated Jira service account (Jira
@@ -190,12 +213,25 @@ value to `0` to disable the reminders.
 | Endpoint | Purpose |
 |---|---|
 | `GET /health` | liveness + pause state + LiteLLM health + currently running agents (no auth) |
+| `GET /ops.json` | operator status snapshot: status, pause/degraded, running agents, board backlog (last sweep), recent escalations (no auth, no secrets) |
 | `GET /metrics` | Prometheus metrics: dispatch/escalation/reclaim/sweep-failure counters + live gauges (no auth) |
 | `GET /audit?ticket=…&event=…&limit=…` | query the audit trail (newest matching records, across rotated generations; auth required) |
 | `POST /webhook/jira` | Jira webhook receiver |
 | `POST /sweep` | force an immediate board sweep |
 | `POST /pause?reason=…` | freeze all dispatch (in-flight runs drain); survives restart |
 | `POST /resume` | lift the pause and resume dispatching |
+
+`GET /ops.json` returns a single read-only JSON snapshot for humans and light automation —
+`status` (starting/ok/paused/degraded, same roll-up as `/health`), a `pause` block
+(reason + timestamp), a `sweep` block (last time, last error, failure count), `llm` health,
+`running_agents`, the `board` backlog from the last sweep (per-status queue depth plus
+`needs_human` / `handoff_invalid` counts, as of `board.sampled_at`), and `recent_escalations`
+(the newest `escalation` / `orchestrator_escalation` / `stale_escalation_reminder` events,
+reduced to `at`/`event`/`ticket`/`role`). It reuses the sweep snapshot rather than hitting
+Jira, returns **no secrets**, and (like `/health` and `/metrics`) is **unauthenticated** — keep
+it on a trusted network or behind a reverse proxy until endpoint auth is added. Active/stale
+lease enumeration is intentionally deferred (leases live in Jira issue properties; reading them
+all is an unbounded scan) — use `needs_human`, `recent_escalations`, and `GET /audit` instead.
 
 `GET /metrics` exposes the Prometheus text format for scraping — monotonic counters
 (`sentinel_dispatches_total`, `sentinel_escalations_total`, `sentinel_lease_reclaims_total`,

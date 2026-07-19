@@ -44,7 +44,7 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 ├── .claude/skills/issue-autopilot/SKILL.md   # dev tooling: sets up the scheduled highest-priority-issue triage→debrief-or-implement→PR Routine (not part of the Sentinel runtime)
 ├── sentinel/                  # the Python package (~1.9k lines, Python 3.12, asyncio)
 │   ├── __init__.py            # docstring + __version__ ("0.1.0")
-│   ├── server.py              # FastAPI app: /health, /webhook/jira, /sweep; starts the orchestrator loop
+│   ├── server.py              # FastAPI app: /health, /ops.json (operator snapshot), /metrics, /audit, /webhook/jira, /sweep, /pause, /resume; starts the orchestrator loop
 │   ├── orchestrator.py        # role 01: sweep + webhook dispatch, leases, WIP, loop-breaker, handoff audit
 │   ├── agent.py               # AgentRunner: builds system prompts, runs the LLM tool loop, heartbeats
 │   ├── tools.py               # all 19 agent tools + their enforcement logic (the contract layer)
@@ -56,7 +56,8 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   ├── metrics.py             # Prometheus counters + labeled-gauge exposition (served at GET /metrics)
 │   ├── config.py              # env settings + config/pipeline.yml loader (RoleConfig, Settings); validate_config fails fast on a malformed dispatch table
 │   ├── audit.py               # append-only JSONL audit log (thread-locked); size-rotated with retention; queryable via GET /audit
-│   └── doctor.py              # readiness-gate CLI: classifies findings BLOCKERS/WARNINGS/INFO (READY: yes|no), --format json, --no-network; commands/docs/Jira(+/mypermissions)/LiteLLM/security
+│   ├── doctor.py              # readiness-gate CLI: classifies findings BLOCKERS/WARNINGS/INFO (READY: yes|no), --format json, --no-network; commands/docs/Jira(+/mypermissions)/LiteLLM/security
+│   └── onboard.py             # guided setup CLI: writes .env (from .env.example) + fills pipeline.yml commands; secrets never printed
 ├── config/pipeline.yml        # THE dispatch table: role triggers, WIP limits, labels, models, project commands
 ├── docs/                      # role goal documents — these ARE the agents' system prompts
 │   ├── README.md              # loading contract + pointer to the project vision
@@ -81,6 +82,8 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   └── test_server_auth.py    # control-plane auth: header/bearer/query, constant-time, wrong/missing 403, open mode
 │   └── test_metrics.py        # metrics: counter inc/snapshot, Prometheus exposition shape, gauges
 │   └── test_llm.py            # LLM health tracking: consecutive_failures/last_error/last_ok_at + last_error sanitization + per-role/model token-usage accumulation
+│   └── test_onboard.py        # onboarding: env/config rendering + comment preservation, secrets-never-printed, blank-command warnings, dry-run, generated config loads
+│   └── test_ops.py            # GET /ops.json: status roll-up, snapshot shape + no-secrets, recent-escalation filter/sanitize/limit, idle-endpoint smoke
 │   └── test_doctor.py         # readiness gate: command-blank blockers (role impact), security/reviewer warnings, ready() logic, text/json render, LLM error classification
 ├── conftest.py                # inserts repo root into sys.path (bare `pytest` support)
 ├── Dockerfile                 # python:3.12-slim + git/curl (for shell roles); entrypoint serve|doctor
@@ -136,6 +139,10 @@ Jira webhooks ─┐                          ┌─> AgentRunner._loop (LLM too
    `GET /audit?ticket=…&event=…&limit=…` (query the audit trail: newest matching records
    oldest-first across rotated generations via `AuditLog.read_records`; **auth required**
    unlike `/metrics`, since records carry ticket activity and error strings),
+   `GET /ops.json` (read-only operator snapshot built by `build_ops_snapshot` from live
+   orchestrator state + the last sweep's `board_state` + recent escalations read from the
+   audit trail, reduced to `at`/`event`/`ticket`/`role`; **no secrets**, unauthenticated
+   like `/health`; active/stale lease enumeration deferred — documented in the payload),
    `POST /webhook/jira`, `POST /sweep`, `POST /pause?reason=…`, `POST /resume`.
    `/health` also reports LiteLLM backend health (`llm.consecutive_failures`, tracked
    passively by `LLM.chat`) and flips to `degraded` after 3 consecutive LLM failures — so a
@@ -312,7 +319,11 @@ require_label/condition, `shell`, `model`, `estimators`, `min_interval_seconds`)
 **`commands:`** — project-specific clone/test/deploy_test/deploy_staging/deploy_production/
 smoke_test/rollback strings injected into shell-role prompts. **All command strings are
 empty by default; shell roles escalate with `needs-human` rather than guess** — filling
-these in is the per-project onboarding step.
+these in is the per-project onboarding step, which `sentinel/onboard.py` guides
+(`python -m sentinel.onboard`): it writes `.env` from `.env.example` and fills the
+`commands:` block in place (comment-preserving), reads secrets without echo and never prints
+them, warns which role escalates for each blank command, and can hand off to `doctor`.
+`--dry-run` writes nothing; an existing `.env` needs `--force` to overwrite.
 
 `docs/` and `config/` are volume-mounted read-only in compose; edit +
 `docker compose restart sentinel` to apply.
@@ -339,7 +350,8 @@ python -m sentinel.doctor            # readiness gate: BLOCKERS/WARNINGS/INFO + 
 python -m sentinel.doctor --format json --no-network   # machine-readable, offline classification
 
 # Production
-cp .env.example .env                 # fill in Jira PAT/domain + LiteLLM domain/key
+python -m sentinel.onboard           # guided: writes .env + fills pipeline.yml commands
+#   (or hand-edit) cp .env.example .env  # fill in Jira PAT/domain + LiteLLM domain/key
 docker compose run --rm doctor
 docker compose up -d --build
 docker compose exec sentinel tail -f /data/audit.jsonl   # audit trail
@@ -392,7 +404,7 @@ is tested end to end without a model.
 - Version 0.1.0; single project key per deployment; one container, no horizontal scaling
   (concurrency is per-status WIP limits inside one asyncio process).
 - `commands:` in `pipeline.yml` are intentionally blank — the platform is generic until a
-  project fills them in.
+  project fills them in; `python -m sentinel.onboard` guides that first-run setup.
 - Notifications: Jira comments + `needs-human` label are always written; additionally, if
   `SENTINEL_ALERT_WEBHOOK_URL` is set, `notify.py` pushes escalations and pause/resume to a
   chat webhook (Slack-compatible, best-effort). Richer routing (per-event severity, paging)

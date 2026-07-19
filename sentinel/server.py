@@ -108,19 +108,76 @@ def _spawn_background(coro) -> None:
     task.add_done_callback(_background.discard)
 
 
+# Audit events that represent something a human should look at, surfaced by /ops.json.
+ATTENTION_EVENTS = ("escalation", "orchestrator_escalation", "stale_escalation_reminder")
+
+
+def _overall_status(orch, llm_ok: bool) -> str:
+    """Roll orchestrator + LLM health into one word (shared by /health and /ops.json)."""
+    if not orch.agent_user:
+        return "starting"
+    if orch.paused:
+        return "paused"      # operator freeze — no new dispatch until /resume
+    if orch.consecutive_sweep_failures >= 2 or not llm_ok:
+        # Jira unreachable / PAT expired, or the LiteLLM backend is failing — either
+        # way agents can't make progress and every dispatch just escalates.
+        return "degraded"
+    return "ok"
+
+
+def _recent_escalations(records: list[dict], limit: int = 10) -> list[dict]:
+    """The most recent escalation events from an audit page, newest first, reduced to
+    a non-sensitive subset (no error/reason strings) so /ops.json can stay
+    unauthenticated like /health. `records` is oldest-first (as read_records returns)."""
+    out: list[dict] = []
+    for rec in reversed(records):
+        if rec.get("event") in ATTENTION_EVENTS:
+            out.append({"at": rec.get("at"), "event": rec.get("event"),
+                        "ticket": rec.get("ticket"), "role": rec.get("role")})
+            if len(out) >= limit:
+                break
+    return out
+
+
+def build_ops_snapshot(orch, cfg, llm_client, recent_escalations: list[dict],
+                       *, degraded_after: int = LLM_DEGRADED_AFTER) -> dict:
+    """Assemble the read-only operational snapshot from live orchestrator state and
+    the last board sweep. Contains no secrets."""
+    llm_ok = llm_client.consecutive_failures < degraded_after
+    board = orch.board_state
+    return {
+        "status": _overall_status(orch, llm_ok),
+        "version": __version__,
+        "agent_user": orch.agent_user,
+        "pause": {"paused": orch.paused, "at": orch.paused_at, "reason": orch.pause_reason},
+        "sweep": {"last_at": orch.last_sweep_at, "last_error": orch.last_sweep_error,
+                  "consecutive_failures": orch.consecutive_sweep_failures,
+                  "count": orch.sweep_count},
+        "pending_webhook_evaluations": len(orch._pending_keys),
+        "llm": {"ok": llm_ok, "gated": orch.llm_gated,
+                "consecutive_failures": llm_client.consecutive_failures,
+                "last_error": llm_client.last_error, "last_ok_at": llm_client.last_ok_at,
+                "tokens_today": llm_client.tokens_in_current_window(),
+                "daily_token_budget": cfg.llm_daily_token_budget},
+        "running_agents": [{"role": role_id, "ticket": ticket}
+                           for (role_id, ticket) in orch.running],
+        "board": {"sampled_at": orch.last_sweep_at,
+                  "total": board.get("total", 0),
+                  "needs_human": board.get("needs_human", 0),
+                  "handoff_invalid": board.get("handoff_invalid", 0),
+                  "by_status": dict(board.get("by_status", {}))},
+        "recent_escalations": recent_escalations,
+        "leases": {"note": "active/stale lease enumeration is deferred: leases live in "
+                           "Jira issue properties and reading them all is an unbounded "
+                           "board scan. Use needs_human / recent_escalations and "
+                           "GET /audit instead."},
+    }
+
+
 @app.get("/health")
 async def health() -> dict:
     llm_ok = llm.consecutive_failures < LLM_DEGRADED_AFTER
-    if not orchestrator.agent_user:
-        status = "starting"
-    elif orchestrator.paused:
-        status = "paused"     # operator freeze — no new dispatch until /resume
-    elif orchestrator.consecutive_sweep_failures >= 2 or not llm_ok:
-        # Jira unreachable / PAT expired, or the LiteLLM backend is failing — either
-        # way agents can't make progress and every dispatch just escalates.
-        status = "degraded"
-    else:
-        status = "ok"
+    status = _overall_status(orchestrator, llm_ok)
     return {
         "status": status,
         "version": __version__,
@@ -147,6 +204,19 @@ async def health() -> dict:
             for (role_id, ticket) in orchestrator.running
         ],
     }
+
+
+@app.get("/ops.json")
+async def ops_status() -> dict:
+    """Read-only operational snapshot for operators: overall status, pause/degraded
+    state, running agents, the board backlog from the last sweep (per-status depth +
+    needs-human / handoff-invalid counts), and the most recent escalations from the
+    audit trail. No secrets are returned; it is unauthenticated like /health and
+    /metrics — keep it on a trusted network / behind a reverse proxy (endpoint auth
+    hardening is tracked separately). Board figures are as of `board.sampled_at` (the
+    last sweep), not live, to avoid extra Jira load."""
+    records = await asyncio.to_thread(audit.read_records, 200)
+    return build_ops_snapshot(orchestrator, settings, llm, _recent_escalations(records))
 
 
 @app.get("/metrics", response_class=PlainTextResponse)
