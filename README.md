@@ -196,12 +196,25 @@ value to `0` to disable the reminders.
 | Endpoint | Purpose |
 |---|---|
 | `GET /health` | liveness + pause state + LiteLLM health + currently running agents (no auth) |
+| `GET /ops.json` | operator status snapshot: status, pause/degraded, running agents, board backlog (last sweep), recent escalations (no auth, no secrets) |
 | `GET /metrics` | Prometheus metrics: dispatch/escalation/reclaim/sweep-failure counters + live gauges (no auth) |
 | `GET /audit?ticket=…&event=…&role=…&limit=…` | query the audit trail (newest matching records, across rotated generations; auth required; also `python -m sentinel.audit`) |
 | `POST /webhook/jira` | Jira webhook receiver |
 | `POST /sweep` | force an immediate board sweep |
 | `POST /pause?reason=…` | freeze all dispatch (in-flight runs drain); survives restart |
 | `POST /resume` | lift the pause and resume dispatching |
+
+`GET /ops.json` returns a single read-only JSON snapshot for humans and light automation —
+`status` (starting/ok/paused/degraded, same roll-up as `/health`), a `pause` block
+(reason + timestamp), a `sweep` block (last time, last error, failure count), `llm` health,
+`running_agents`, the `board` backlog from the last sweep (per-status queue depth plus
+`needs_human` / `handoff_invalid` counts, as of `board.sampled_at`), and `recent_escalations`
+(the newest `escalation` / `orchestrator_escalation` / `stale_escalation_reminder` events,
+reduced to `at`/`event`/`ticket`/`role`). It reuses the sweep snapshot rather than hitting
+Jira, returns **no secrets**, and (like `/health` and `/metrics`) is **unauthenticated** — keep
+it on a trusted network or behind a reverse proxy until endpoint auth is added. Active/stale
+lease enumeration is intentionally deferred (leases live in Jira issue properties; reading them
+all is an unbounded scan) — use `needs_human`, `recent_escalations`, and `GET /audit` instead.
 
 `GET /metrics` exposes the Prometheus text format for scraping — monotonic counters
 (`sentinel_dispatches_total`, `sentinel_escalations_total`, `sentinel_lease_reclaims_total`,
