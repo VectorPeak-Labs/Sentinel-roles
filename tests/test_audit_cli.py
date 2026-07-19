@@ -55,6 +55,37 @@ def test_ticket_timeline_json(audit_file, capsys):
     assert recs[1]["reason"] == "deploy_production missing"   # raw fields preserved in json
 
 
+# --- --format / --file accepted on either side of the subcommand ----------- #
+
+def test_format_json_after_subcommand(audit_file, capsys):
+    # Regression: the documented `recent … --format json` (option after the
+    # subcommand) must work, not just `--format json recent …`.
+    rc, out = _run(["--file", str(audit_file), "recent", "--event", "escalation",
+                    "--format", "json"], capsys)
+    assert rc == 0
+    recs = json.loads(out.out)
+    assert len(recs) == 1 and recs[0]["event"] == "escalation"
+
+
+def test_format_json_before_subcommand_still_works(audit_file, capsys):
+    rc, out = _run(["--file", str(audit_file), "--format", "json", "recent",
+                    "--event", "escalation"], capsys)
+    assert rc == 0
+    assert json.loads(out.out)[0]["event"] == "escalation"
+
+
+def test_file_after_subcommand(audit_file, capsys):
+    rc, out = _run(["recent", "--file", str(audit_file), "--format", "json"], capsys)
+    assert rc == 0
+    assert len(json.loads(out.out)) == 4
+
+
+def test_ticket_format_after_subcommand(audit_file, capsys):
+    rc, out = _run(["--file", str(audit_file), "ticket", "SENT-2", "--format", "json"], capsys)
+    assert rc == 0
+    assert [r["event"] for r in json.loads(out.out)] == ["dispatch", "escalation"]
+
+
 # --- recent + filters ------------------------------------------------------ #
 
 def test_recent_all(audit_file, capsys):

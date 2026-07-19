@@ -159,13 +159,23 @@ def main(argv: list[str] | None = None) -> int:
     import argparse
     import json as _json
 
+    def _add_common(p, *, on_subcommand: bool) -> None:
+        # Accept --file / --format on either side of the subcommand. On the
+        # subparsers the defaults are SUPPRESSed so that a value given *before*
+        # the subcommand (parsed at the top level) is not clobbered when the
+        # option is omitted *after* it — argparse leaves the attribute untouched.
+        p.add_argument("--file", type=Path,
+                       default=(argparse.SUPPRESS if on_subcommand else None),
+                       help="audit.jsonl path (default: ${DATA_DIR:-/data}/audit.jsonl)")
+        p.add_argument("--format", choices=("text", "json"),
+                       default=(argparse.SUPPRESS if on_subcommand else "text"),
+                       help="output format (default: text)")
+
     parser = argparse.ArgumentParser(
         prog="python -m sentinel.audit",
         description="Query the Sentinel audit trail (JSONL) for a ticket timeline "
                     "or recent activity.")
-    parser.add_argument("--file", type=Path, default=None,
-                        help="audit.jsonl path (default: ${DATA_DIR:-/data}/audit.jsonl)")
-    parser.add_argument("--format", choices=("text", "json"), default="text")
+    _add_common(parser, on_subcommand=False)
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_recent = sub.add_parser("recent", help="most recent events (newest last)")
@@ -173,12 +183,14 @@ def main(argv: list[str] | None = None) -> int:
     p_recent.add_argument("--ticket", default=None)
     p_recent.add_argument("--event", default=None)
     p_recent.add_argument("--role", default=None)
+    _add_common(p_recent, on_subcommand=True)
 
     p_ticket = sub.add_parser("ticket", help="chronological timeline for one ticket")
     p_ticket.add_argument("key", help="Jira issue key, e.g. SENT-42")
     p_ticket.add_argument("--limit", type=int, default=1000)
     p_ticket.add_argument("--event", default=None)
     p_ticket.add_argument("--role", default=None)
+    _add_common(p_ticket, on_subcommand=True)
 
     args = parser.parse_args(argv)
     path = args.file or _default_audit_path()
