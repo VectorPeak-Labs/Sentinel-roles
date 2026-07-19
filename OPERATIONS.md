@@ -1,9 +1,9 @@
 # Operating Sentinel
 
 How to monitor a running Sentinel, what to alert on, and what to do when an alert
-fires. Everything here is built on two unauthenticated read endpoints — `GET /health`
-(point-in-time) and `GET /metrics` (Prometheus text format) — plus the auth-guarded
-`GET /audit` query endpoint for investigation.
+fires. Everything here is built on public minimal `GET /health` liveness,
+Prometheus `GET /metrics`, authenticated `GET /ops.json` operational detail, and the
+authenticated `GET /audit` query endpoint for investigation.
 
 ## Scraping
 
@@ -20,8 +20,9 @@ absolute values.
 | Token budget | UTC-day tokens ≥ `SENTINEL_LLM_DAILY_TOKEN_BUDGET` | same pause (persisted, alerted) | **manual** — a blown budget means something ran away |
 | LLM outage gate | `sentinel_llm_consecutive_failures` ≥ 3 | dispatch suspended; one probe call per sweep | **automatic** on first successful probe |
 
-`GET /health` reports which one is active: `status: paused` + `pause_reason` for the
-first two, `llm.gated: true` for the third.
+`GET /health` reports the roll-up status (`paused` for the first two, `degraded` when
+LLM/Jira health crosses its threshold). Use authenticated `GET /ops.json` for the pause
+reason, `llm.gated`, and other operational detail.
 
 ## Recommended alerts
 

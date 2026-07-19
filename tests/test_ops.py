@@ -118,3 +118,14 @@ def test_ops_endpoint_smoke():
                 "recent_escalations", "leases"):
         assert key in snap
     assert snap["recent_escalations"] == []  # empty audit log
+
+
+def test_ops_endpoint_is_marked_admin_auth_guarded():
+    route = next(r for r in srv.app.routes if getattr(r, "path", None) == "/ops.json")
+    assert any(dep.call is srv.require_admin_auth for dep in route.dependant.dependencies)
+
+
+def test_control_endpoints_are_marked_admin_auth_guarded():
+    for path in ("/sweep", "/pause", "/resume", "/audit"):
+        route = next(r for r in srv.app.routes if getattr(r, "path", None) == path)
+        assert any(dep.call is srv.require_admin_auth for dep in route.dependant.dependencies)

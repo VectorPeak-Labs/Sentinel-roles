@@ -67,6 +67,7 @@ class Settings:
     litellm_api_key: str
     default_model: str
     webhook_secret: str
+    admin_token: str
     alert_webhook_url: str
     data_dir: Path
     docs_dir: Path
@@ -186,6 +187,7 @@ def load_settings(config_path: str | os.PathLike | None = None) -> Settings:
         litellm_api_key=_require("LITELLM_API_KEY"),
         default_model=os.environ.get("SENTINEL_DEFAULT_MODEL", "gpt-4o"),
         webhook_secret=os.environ.get("WEBHOOK_SECRET", ""),
+        admin_token=os.environ.get("SENTINEL_ADMIN_TOKEN", ""),
         alert_webhook_url=os.environ.get("SENTINEL_ALERT_WEBHOOK_URL", "").strip(),
         data_dir=Path(os.environ.get("DATA_DIR", "/data")),
         docs_dir=Path(os.environ.get("DOCS_DIR", "docs")),
