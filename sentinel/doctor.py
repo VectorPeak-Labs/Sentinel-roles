@@ -55,6 +55,33 @@ _COMMAND_IMPACT: dict[str, str] = {
 
 _SHARED_DOCS = ("00-overview-and-conventions.md", "00a-operating-manual.md")
 
+# Jira project permissions the service account must hold for the pipeline to
+# operate. Checked NON-MUTATINGLY via GET /mypermissions (Server/DC): a permission
+# reported present-but-false is a blocker; one absent from the payload is a warning
+# (an older Jira may not know the key, so it can't be confirmed either way).
+REQUIRED_JIRA_PERMISSIONS: dict[str, str] = {
+    "BROWSE_PROJECTS": "browse issues",
+    "EDIT_ISSUES": "edit issues and issue properties (sentinel.* state)",
+    "TRANSITION_ISSUES": "transition issues between statuses",
+    "ADD_COMMENTS": "add comments (handoff / rework payloads)",
+    "ASSIGN_ISSUES": "assign issues (lease identity)",
+    "CREATE_ATTACHMENTS": "attach files (evidence channel)",
+}
+
+
+def permission_findings(permissions: dict, r: Report) -> None:
+    """Classify a Jira ``/mypermissions`` payload's ``permissions`` object. A
+    required permission reported false is a blocker (the pipeline cannot move
+    tickets, record evidence, or lease work without it); one the endpoint does
+    not report is a warning (unconfirmed)."""
+    for key, capability in REQUIRED_JIRA_PERMISSIONS.items():
+        entry = permissions.get(key)
+        if entry is None:
+            r.warn(f"Jira permission {key} not reported by /mypermissions — cannot "
+                   f"confirm the service account can {capability}")
+        elif not entry.get("havePermission"):
+            r.blocker(f"Jira service account lacks {key} — cannot {capability}")
+
 
 @dataclass
 class Report:
@@ -162,9 +189,16 @@ async def check_jira(settings: Settings, r: Report) -> None:
             if status.lower() not in known:
                 r.blocker(f"workflow status '{status}' not found in project "
                           f"{settings.jira_project} — fix the Jira workflow or config/pipeline.yml")
-        r.note("Jira write-permission probes (labels / properties / comments / attachments / "
-               "assignee) are deferred — a readiness check does not mutate a live project; "
-               "run a smoke ticket to confirm the service account's rights")
+        try:
+            perms = (await jira._request(
+                "GET", "/mypermissions",
+                params={"projectKey": settings.jira_project})).json()
+            permission_findings(perms.get("permissions", {}), r)
+            r.note("Jira project permissions checked via /mypermissions (non-mutating)")
+        except (JiraError, httpx.HTTPError) as e:
+            r.warn(f"could not check Jira permissions via /mypermissions ({type(e).__name__}) "
+                   f"— verify browse/edit/transition/comment/assign/attach for the service "
+                   f"account manually")
     except (JiraError, httpx.HTTPError) as e:
         r.blocker(f"Jira unreachable at {settings.jira_base_url}: {type(e).__name__}: {e}")
     finally:

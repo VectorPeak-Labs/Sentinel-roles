@@ -8,11 +8,14 @@ import json
 
 import pytest
 
+import sentinel.doctor as doctor
 from sentinel.config import load_settings
 from sentinel.doctor import (
     COMMAND_ORDER,
+    REQUIRED_JIRA_PERMISSIONS,
     Report,
     _classify_llm_error,
+    permission_findings,
     readiness_findings,
     render,
 )
@@ -138,3 +141,36 @@ def test_classify_llm_error_by_status(status, expected):
 
 def test_classify_llm_error_network():
     assert "network/connection error" in _classify_llm_error(RuntimeError("no route"))
+
+
+# --- Jira permission classification (non-mutating /mypermissions) ----------- #
+
+def _all_granted() -> dict:
+    return {k: {"havePermission": True} for k in REQUIRED_JIRA_PERMISSIONS}
+
+
+def test_permission_findings_all_granted():
+    r = Report()
+    permission_findings(_all_granted(), r)
+    assert r.blockers == []
+    assert r.warnings == []
+
+
+def test_permission_findings_denied_is_blocker():
+    perms = _all_granted()
+    perms["ADD_COMMENTS"] = {"havePermission": False}
+    perms["CREATE_ATTACHMENTS"] = {"havePermission": False}
+    r = Report()
+    permission_findings(perms, r)
+    assert any("ADD_COMMENTS" in b for b in r.blockers)
+    assert any("CREATE_ATTACHMENTS" in b for b in r.blockers)
+    assert r.ready is False
+
+
+def test_permission_findings_absent_is_warning():
+    perms = _all_granted()
+    del perms["TRANSITION_ISSUES"]  # not reported by this Jira version
+    r = Report()
+    permission_findings(perms, r)
+    assert any("TRANSITION_ISSUES" in w for w in r.warnings)
+    assert not any("TRANSITION_ISSUES" in b for b in r.blockers)

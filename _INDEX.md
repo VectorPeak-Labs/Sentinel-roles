@@ -56,7 +56,7 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   ├── metrics.py             # Prometheus counters + labeled-gauge exposition (served at GET /metrics)
 │   ├── config.py              # env settings + config/pipeline.yml loader (RoleConfig, Settings); validate_config fails fast on a malformed dispatch table
 │   ├── audit.py               # append-only JSONL audit log (thread-locked); size-rotated with retention; queryable via GET /audit
-│   └── doctor.py              # readiness-gate CLI: classifies findings BLOCKERS/WARNINGS/INFO (READY: yes|no), --format json, --no-network; commands/docs/Jira/LiteLLM/security
+│   └── doctor.py              # readiness-gate CLI: classifies findings BLOCKERS/WARNINGS/INFO (READY: yes|no), --format json, --no-network; commands/docs/Jira(+/mypermissions)/LiteLLM/security
 ├── config/pipeline.yml        # THE dispatch table: role triggers, WIP limits, labels, models, project commands
 ├── docs/                      # role goal documents — these ARE the agents' system prompts
 │   ├── README.md              # loading contract + pointer to the project vision

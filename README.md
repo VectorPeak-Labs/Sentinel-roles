@@ -30,7 +30,8 @@ prints `READY: yes|no`, exiting non-zero until the deployment is safe and useful
   workflow status that does not exist in your Jira.
 - **WARNINGS** — runs, with a known risk: `WEBHOOK_SECRET` empty (mutating endpoints
   unauthenticated), `/health` exposure, the Code Reviewer sharing the default model.
-- **INFO** — confirmations (roles loaded, statuses found, default model) and deferred checks.
+- **INFO** — confirmations (roles loaded, statuses found, default model, Jira project
+  permissions verified non-mutatingly via `/mypermissions`).
 
 ```bash
 python -m sentinel.doctor                 # human-readable readiness report
