@@ -21,8 +21,25 @@ docker compose run --rm doctor   # pre-flight: Jira, project statuses, LiteLLM, 
 docker compose up -d --build
 ```
 
-`doctor` verifies connectivity and that every pipeline status exists in your Jira workflow
-before anything runs.
+`doctor` is a **readiness gate**, not just a connectivity check. It classifies findings and
+prints `READY: yes|no`, exiting non-zero until the deployment is safe and useful to run:
+
+- **BLOCKERS** — will not run productively as configured: a missing role document, a blank
+  shell-role command whose role would escalate on first use (e.g. `commands.deploy_production`
+  empty → Release role 12 escalates on every release), an unreachable Jira/LiteLLM, or a
+  workflow status that does not exist in your Jira.
+- **WARNINGS** — runs, with a known risk: `WEBHOOK_SECRET` empty (mutating endpoints
+  unauthenticated), `/health` exposure, the Code Reviewer sharing the default model.
+- **INFO** — confirmations (roles loaded, statuses found, default model, Jira project
+  permissions verified non-mutatingly via `/mypermissions`).
+
+```bash
+python -m sentinel.doctor                 # human-readable readiness report
+python -m sentinel.doctor --format json   # machine-readable {ready, blockers, warnings, info}
+python -m sentinel.doctor --no-network    # config/command/security readiness only (offline)
+```
+
+Fix every **BLOCKER** before `docker compose up`; review **WARNINGS** for your deployment.
 
 ### Guided onboarding
 
@@ -263,5 +280,5 @@ raw records (all fields), text prints a one-line-per-event timeline.
 ```bash
 python -m venv .venv && .venv/bin/pip install -r requirements.txt pytest
 .venv/bin/pytest tests -q         # payload-contract + config/dispatch-table tests
-python -m sentinel.doctor          # pre-flight against real Jira/LiteLLM (needs .env vars)
+python -m sentinel.doctor          # readiness gate against real Jira/LiteLLM (needs .env vars)
 ```
