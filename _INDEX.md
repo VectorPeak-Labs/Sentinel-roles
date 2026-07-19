@@ -56,7 +56,7 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   ├── metrics.py             # Prometheus counters + labeled-gauge exposition (served at GET /metrics)
 │   ├── config.py              # env settings + config/pipeline.yml loader (RoleConfig, Settings); validate_config fails fast on a malformed dispatch table
 │   ├── audit.py               # append-only JSONL audit log (thread-locked); size-rotated with retention; queryable via GET /audit
-│   ├── doctor.py              # pre-flight CLI: Jira/project/statuses/LiteLLM/role-doc checks
+│   ├── doctor.py              # readiness-gate CLI: classifies findings BLOCKERS/WARNINGS/INFO (READY: yes|no), --format json, --no-network; commands/docs/Jira(+/mypermissions)/LiteLLM/security
 │   └── onboard.py             # guided setup CLI: writes .env (from .env.example) + fills pipeline.yml commands; secrets never printed
 ├── config/pipeline.yml        # THE dispatch table: role triggers, WIP limits, labels, models, project commands
 ├── docs/                      # role goal documents — these ARE the agents' system prompts
@@ -84,6 +84,7 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   └── test_llm.py            # LLM health tracking: consecutive_failures/last_error/last_ok_at + last_error sanitization + per-role/model token-usage accumulation
 │   └── test_onboard.py        # onboarding: env/config rendering + comment preservation, secrets-never-printed, blank-command warnings, dry-run, generated config loads
 │   └── test_ops.py            # GET /ops.json: status roll-up, snapshot shape + no-secrets, recent-escalation filter/sanitize/limit, idle-endpoint smoke
+│   └── test_doctor.py         # readiness gate: command-blank blockers (role impact), security/reviewer warnings, ready() logic, text/json render, LLM error classification
 ├── conftest.py                # inserts repo root into sys.path (bare `pytest` support)
 ├── Dockerfile                 # python:3.12-slim + git/curl (for shell roles); entrypoint serve|doctor
 ├── docker-compose.yml         # sentinel service (port 8080, docs+config mounted ro, /data volume) + doctor profile
@@ -345,7 +346,8 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt pytest
 .venv/bin/pytest tests -q            # 60+ tests, no network, in-memory fakes
 
 # Pre-flight against real infra (needs .env values exported)
-python -m sentinel.doctor            # checks config, role docs, Jira, statuses, LiteLLM
+python -m sentinel.doctor            # readiness gate: BLOCKERS/WARNINGS/INFO + READY: yes|no
+python -m sentinel.doctor --format json --no-network   # machine-readable, offline classification
 
 # Production
 python -m sentinel.onboard           # guided: writes .env + fills pipeline.yml commands
