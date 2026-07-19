@@ -56,13 +56,14 @@ class AuditLog:
         return [f for f in files if f.exists()]
 
     def read_records(self, limit: int = 100, ticket: str | None = None,
-                     event: str | None = None) -> list[dict]:
+                     event: str | None = None, role: str | None = None) -> list[dict]:
         """The newest `limit` records matching the filters, oldest-first.
 
-        Reads across all retained generations under the write lock, so a
-        concurrent rotation can't tear the view. Malformed lines (e.g. a write
-        interrupted by a crash) are skipped, never raised — the query path must
-        stay as unbreakable as the record path."""
+        Filters (all optional, AND-combined): `ticket`, `event`, `role`. Reads
+        across all retained generations under the write lock, so a concurrent
+        rotation can't tear the view. Malformed lines (e.g. a write interrupted by
+        a crash) are skipped, never raised — the query path must stay as
+        unbreakable as the record path."""
         limit = max(1, int(limit))
         out: deque[dict] = deque(maxlen=limit)
         with self._lock:
@@ -82,6 +83,8 @@ class AuditLog:
                     if ticket and rec.get("ticket") != ticket:
                         continue
                     if event and rec.get("event") != event:
+                        continue
+                    if role and rec.get("role") != role:
                         continue
                     out.append(rec)
         return list(out)
@@ -119,3 +122,85 @@ class AuditLog:
                 self.path.rename(self._backup(1))
         except OSError as e:
             log.warning("audit log rotation failed (%s); continuing to append", e)
+
+
+# --------------------------------------------------------------------------- #
+# Operator query CLI: `python -m sentinel.audit recent|ticket …`
+#
+# Reads the JSONL trail directly (no Jira/LiteLLM env needed) so an operator can
+# reconstruct a ticket or incident history without grepping /data/audit.jsonl.
+# --------------------------------------------------------------------------- #
+
+# Fields rendered inline in the text timeline are the identity columns; the rest
+# of each record is appended as compact key=value pairs so nothing is hidden.
+_TIMELINE_HEAD = ("at", "event", "ticket", "role")
+
+
+def format_timeline(records: list[dict]) -> str:
+    """Render records as a concise one-line-per-event timeline (chronological)."""
+    lines: list[str] = []
+    for rec in records:
+        at = rec.get("at", "?")
+        event = rec.get("event", "?")
+        ticket = rec.get("ticket") or "-"
+        role = rec.get("role") or "-"
+        extra = " ".join(f"{k}={v}" for k, v in rec.items() if k not in _TIMELINE_HEAD)
+        line = f"{at}  {event:<24}  {ticket:<10}  {role:<20}"
+        lines.append(f"{line}  {extra}".rstrip())
+    return "\n".join(lines)
+
+
+def _default_audit_path() -> Path:
+    import os
+    return Path(os.environ.get("DATA_DIR", "/data")) / "audit.jsonl"
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+    import json as _json
+
+    parser = argparse.ArgumentParser(
+        prog="python -m sentinel.audit",
+        description="Query the Sentinel audit trail (JSONL) for a ticket timeline "
+                    "or recent activity.")
+    parser.add_argument("--file", type=Path, default=None,
+                        help="audit.jsonl path (default: ${DATA_DIR:-/data}/audit.jsonl)")
+    parser.add_argument("--format", choices=("text", "json"), default="text")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_recent = sub.add_parser("recent", help="most recent events (newest last)")
+    p_recent.add_argument("--limit", type=int, default=50)
+    p_recent.add_argument("--ticket", default=None)
+    p_recent.add_argument("--event", default=None)
+    p_recent.add_argument("--role", default=None)
+
+    p_ticket = sub.add_parser("ticket", help="chronological timeline for one ticket")
+    p_ticket.add_argument("key", help="Jira issue key, e.g. SENT-42")
+    p_ticket.add_argument("--limit", type=int, default=1000)
+    p_ticket.add_argument("--event", default=None)
+    p_ticket.add_argument("--role", default=None)
+
+    args = parser.parse_args(argv)
+    path = args.file or _default_audit_path()
+    log_ = AuditLog(path, max_bytes=0, backup_count=DEFAULT_BACKUP_COUNT)
+
+    if args.command == "ticket":
+        records = log_.read_records(args.limit, ticket=args.key,
+                                    event=args.event, role=args.role)
+    else:
+        records = log_.read_records(args.limit, ticket=args.ticket,
+                                    event=args.event, role=args.role)
+
+    if args.format == "json":
+        print(_json.dumps(records, indent=2, default=str))
+    elif records:
+        print(format_timeline(records))
+    else:
+        import sys
+        print("(no matching audit records)", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main())

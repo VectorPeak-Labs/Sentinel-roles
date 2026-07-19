@@ -197,7 +197,7 @@ value to `0` to disable the reminders.
 |---|---|
 | `GET /health` | liveness + pause state + LiteLLM health + currently running agents (no auth) |
 | `GET /metrics` | Prometheus metrics: dispatch/escalation/reclaim/sweep-failure counters + live gauges (no auth) |
-| `GET /audit?ticket=…&event=…&limit=…` | query the audit trail (newest matching records, across rotated generations; auth required) |
+| `GET /audit?ticket=…&event=…&role=…&limit=…` | query the audit trail (newest matching records, across rotated generations; auth required; also `python -m sentinel.audit`) |
 | `POST /webhook/jira` | Jira webhook receiver |
 | `POST /sweep` | force an immediate board sweep |
 | `POST /pause?reason=…` | freeze all dispatch (in-flight runs drain); survives restart |
@@ -230,6 +230,20 @@ transition, reclaim and escalation (mirrored to Jira comments where the docs req
 The file is size-rotated (`audit.jsonl.1 … .N`, default 50 MB × 5 generations) so it can't
 fill the `/data` volume; tune with `SENTINEL_AUDIT_MAX_BYTES` / `SENTINEL_AUDIT_BACKUP_COUNT`
 (set max bytes to `0` for a single unbounded file).
+
+To **reconstruct a ticket or incident history** without grepping the JSONL, query it — over
+HTTP (`GET /audit?ticket=SENT-42&event=…&role=…&limit=N`, auth-guarded) or with the offline
+CLI, which reads the file directly (no Jira/LiteLLM env needed) across all rotated generations
+and skips crash-truncated lines:
+
+```bash
+docker compose exec sentinel python -m sentinel.audit ticket SENT-42   # chronological timeline
+python -m sentinel.audit recent --limit 50                             # newest activity
+python -m sentinel.audit recent --event escalation --role 09-deployment --format json
+```
+
+`--file PATH` overrides the default `${DATA_DIR:-/data}/audit.jsonl`; `--format json` prints the
+raw records (all fields), text prints a one-line-per-event timeline.
 
 ## Development
 

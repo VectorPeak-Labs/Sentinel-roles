@@ -55,7 +55,7 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   ├── notify.py              # outbound alert channel: POST escalations/pause to a webhook (Slack-compatible)
 │   ├── metrics.py             # Prometheus counters + labeled-gauge exposition (served at GET /metrics)
 │   ├── config.py              # env settings + config/pipeline.yml loader (RoleConfig, Settings); validate_config fails fast on a malformed dispatch table
-│   ├── audit.py               # append-only JSONL audit log (thread-locked); size-rotated with retention; queryable via GET /audit
+│   ├── audit.py               # append-only JSONL audit log (thread-locked); size-rotated with retention; read_records(ticket/event/role) queryable via GET /audit + `python -m sentinel.audit recent|ticket` CLI
 │   ├── doctor.py              # pre-flight CLI: Jira/project/statuses/LiteLLM/role-doc checks
 │   └── onboard.py             # guided setup CLI: writes .env (from .env.example) + fills pipeline.yml commands; secrets never printed
 ├── config/pipeline.yml        # THE dispatch table: role triggers, WIP limits, labels, models, project commands
@@ -83,6 +83,7 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   └── test_metrics.py        # metrics: counter inc/snapshot, Prometheus exposition shape, gauges
 │   └── test_llm.py            # LLM health tracking: consecutive_failures/last_error/last_ok_at + last_error sanitization + per-role/model token-usage accumulation
 │   └── test_onboard.py        # onboarding: env/config rendering + comment preservation, secrets-never-printed, blank-command warnings, dry-run, generated config loads
+│   └── test_audit_cli.py      # audit query CLI: recent/ticket timelines, event/role filters, text+json, empty→stderr, malformed-line skip, read_records role filter
 ├── conftest.py                # inserts repo root into sys.path (bare `pytest` support)
 ├── Dockerfile                 # python:3.12-slim + git/curl (for shell roles); entrypoint serve|doctor
 ├── docker-compose.yml         # sentinel service (port 8080, docs+config mounted ro, /data volume) + doctor profile
@@ -134,9 +135,10 @@ Jira webhooks ─┐                          ┌─> AgentRunner._loop (LLM too
    (`sentinel_llm_{calls,prompt_tokens,completion_tokens}_total{role,model}`, accumulated
    passively in `llm.usage_totals` from each successful `LLM.chat(role=…)`; in-memory, so
    totals reset on restart — scrape with `rate()`) — unauthenticated like `/health`),
-   `GET /audit?ticket=…&event=…&limit=…` (query the audit trail: newest matching records
+   `GET /audit?ticket=…&event=…&role=…&limit=…` (query the audit trail: newest matching records
    oldest-first across rotated generations via `AuditLog.read_records`; **auth required**
-   unlike `/metrics`, since records carry ticket activity and error strings),
+   unlike `/metrics`, since records carry ticket activity and error strings; the same query is
+   available offline as the `python -m sentinel.audit recent|ticket` CLI),
    `POST /webhook/jira`, `POST /sweep`, `POST /pause?reason=…`, `POST /resume`.
    `/health` also reports LiteLLM backend health (`llm.consecutive_failures`, tracked
    passively by `LLM.chat`) and flips to `degraded` after 3 consecutive LLM failures — so a
