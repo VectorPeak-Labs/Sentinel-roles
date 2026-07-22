@@ -56,14 +56,18 @@ class AuditLog:
         return [f for f in files if f.exists()]
 
     def read_records(self, limit: int = 100, ticket: str | None = None,
-                     event: str | None = None, role: str | None = None) -> list[dict]:
+                     event: str | None = None, role: str | None = None,
+                     since: str | None = None) -> list[dict]:
         """The newest `limit` records matching the filters, oldest-first.
 
-        Filters (all optional, AND-combined): `ticket`, `event`, `role`. Reads
-        across all retained generations under the write lock, so a concurrent
-        rotation can't tear the view. Malformed lines (e.g. a write interrupted by
-        a crash) are skipped, never raised — the query path must stay as
-        unbreakable as the record path."""
+        Filters (all optional, AND-combined): `ticket`, `event`, `role`, and
+        `since` — an ISO-8601 timestamp lower bound (inclusive). Records are
+        written with a UTC `isoformat` `at`, so a lexicographic string compare
+        (`rec["at"] >= since`) is a correct time comparison and needs no parsing.
+        Reads across all retained generations under the write lock, so a
+        concurrent rotation can't tear the view. Malformed lines (e.g. a write
+        interrupted by a crash) are skipped, never raised — the query path must
+        stay as unbreakable as the record path."""
         limit = max(1, int(limit))
         out: deque[dict] = deque(maxlen=limit)
         with self._lock:
@@ -85,6 +89,8 @@ class AuditLog:
                     if event and rec.get("event") != event:
                         continue
                     if role and rec.get("role") != role:
+                        continue
+                    if since and str(rec.get("at") or "") < since:
                         continue
                     out.append(rec)
         return list(out)
