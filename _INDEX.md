@@ -54,11 +54,12 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   ├── llm.py                 # thin AsyncOpenAI wrapper pointed at LiteLLM; tracks call health for /health + per-role token usage for /metrics
 │   ├── notify.py              # outbound alert channel: POST escalations/pause to a webhook (Slack-compatible)
 │   ├── metrics.py             # Prometheus counters + labeled-gauge exposition (served at GET /metrics)
-│   ├── config.py              # env settings + config/pipeline.yml loader (RoleConfig, Settings); validate_config fails fast on a malformed dispatch table
+│   ├── config.py              # env settings + config/pipeline.yml loader (RoleConfig, Settings); validate_config fails fast on a malformed dispatch table; also loads config/policy.yml into a typed Policy (security/review/qa/release), validated fail-fast, defaults == current behavior
 │   ├── audit.py               # append-only JSONL audit log (thread-locked); size-rotated with retention; read_records(ticket/event/role) queryable via GET /audit + `python -m sentinel.audit recent|ticket` CLI
 │   ├── doctor.py              # readiness-gate CLI: classifies findings BLOCKERS/WARNINGS/INFO (READY: yes|no), --format json, --no-network; commands/docs/Jira(+/mypermissions)/LiteLLM/security
 │   └── onboard.py             # guided setup CLI: writes .env (from .env.example) + fills pipeline.yml commands; secrets never printed
 ├── config/pipeline.yml        # THE dispatch table: role triggers, WIP limits, labels, models, project commands
+├── config/policy.yml          # project policy pack: security baseline + review/QA/release rules; loaded by config.py, injected into every role prompt; defaults == built-in behavior
 ├── docs/                      # role goal documents — these ARE the agents' system prompts
 │   ├── README.md              # loading contract + pointer to the project vision
 │   ├── PROJECT_VISION.md      # product north star: Jira-native, contract-enforced autonomous delivery
@@ -68,6 +69,7 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 ├── tests/                     # pytest suite (in-memory fakes, no network)
 │   ├── fakes.py               # FakeJira + FakeLLM (scripted tool-call responses)
 │   ├── test_config.py         # dispatch table ↔ docs pipeline parity, env expansion, required env vars, dispatch-table validation (bad trigger/label/condition/wip)
+│   ├── test_policy.py         # project policy pack: defaults==behavior, shipped file loads to defaults, overlay/coercion, fail-fast validation (baseline/soak/bool/int/unknown key+section), env expansion, policy-driven prompt injection
 │   ├── test_payloads.py       # handoff/rejection schema rules, fence extraction ({code} + ```)
 │   ├── test_lease.py          # claim/heartbeat/release/reclaim + staleness boundaries
 │   ├── test_orchestrator.py   # dispatch gating (labels/lease/WIP/retries/waiting), webhook debounce, ORC-5 validation

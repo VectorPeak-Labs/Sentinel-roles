@@ -1,0 +1,31 @@
+# Sentinel project policy pack.
+#
+# Declares the project's security, review, QA, and release rules in one place so
+# different teams can configure them without hand-editing every role document.
+# The values below are the SHIPPED DEFAULTS and are equivalent to Sentinel's
+# built-in behavior — a deployment with no policy.yml (or a policy that omits a
+# key) behaves exactly like this file.
+#
+# The policy is loaded by sentinel/config.py, validated at startup (an invalid
+# value fails loudly, like a bad pipeline.yml), and summarized into every role
+# agent's system prompt. Override the path with SENTINEL_POLICY if needed.
+
+security:
+  # Named application-security baseline the pipeline checks against.
+  # One of: owasp-asvs-l1 | owasp-asvs-l2 | owasp-asvs-l3 | none
+  baseline: owasp-asvs-l2
+  require_dependency_scan: true   # role 08 must run a dependency/CVE scan
+  require_secrets_scan: true      # role 08 must run a secrets scan
+
+review:
+  require_ci_green: true          # role 08 rejects if CI is not green at the reviewed head
+  allow_minor_followups: true     # minor-only findings may become a follow-up ticket, not a rejection
+
+qa:
+  require_visual_evidence: true   # role 10 must attach visual QA evidence
+  require_screenshots: true       # ...including screenshots at the defined breakpoints
+
+release:
+  require_human_notes_approval: true   # role 12 needs human sign-off on client-facing release notes
+  soak_minutes: 30                     # post-deploy soak/observation window (minutes)
+  require_reversible_migrations: true  # role 12 only releases reversible migrations

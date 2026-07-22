@@ -19,7 +19,7 @@ Tickets in **Client Review Accepted** + an open release window (scheduled, or hu
 2. **Final security re-scan:** dependency/CVE scan against the release artifact (CVEs published since Tech Review are the target). New `blocker` CVE → pull the affected ticket from the release, escalate.
 3. **Release notes:** generate from ticket history — client-facing section (business language, from the role-11 packets) and internal section (technical, from MRs). Human sign-off on the client-facing notes.
 4. **Deploy:** announce start, run migrations, deploy the Staging-verified artifact (never rebuild), record build hash.
-5. **Verify:** post-deploy suite green + key business paths manually spot-checked via automation; watch error rates for the defined soak period (default 30 min).
+5. **Verify:** post-deploy suite green + key business paths manually spot-checked via automation; watch error rates for the soak period set by the project policy (`config/policy.yml` → `release.soak_minutes`, default 30 min). Only release reversible migrations when `release.require_reversible_migrations` is set, and get human sign-off on client-facing notes when `release.require_human_notes_approval` is set (both default on).
 6. **Close out:** tickets → Done with release version; notes published; stakeholders notified.
 
 ## Exit criteria (checklist)
