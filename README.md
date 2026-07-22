@@ -21,6 +21,32 @@ docker compose run --rm doctor   # pre-flight: Jira, project statuses, LiteLLM, 
 docker compose up -d --build
 ```
 
+### See it run locally (no Jira, LiteLLM, or secrets)
+
+To watch the workflow operate end to end before wiring up any credentials, run the
+deterministic demo:
+
+```bash
+python -m sentinel.demo                      # prints the pipeline walk + audit timeline
+python -m sentinel.demo --markdown demo.md   # also write a Markdown transcript
+python -m sentinel.demo --quiet              # one-line status (for CI smoke checks)
+```
+
+It drives the **real** Orchestrator, agent tool loop, handoff-payload validation, lease
+manager, and audit log — only Jira and LiteLLM are replaced by an in-memory board and a
+scripted model, so no external services or secrets are involved. One representative ticket
+walks from the icebox to a reviewed change:
+
+```
+New (activate) → Business Requirements → Technical Requirements → Technical Refinement
+→ To Do → In Progress → Tech Review → Tech Review Accepted
+```
+
+Each step is a genuine dispatch with a schema-valid `agent_handoff` payload (the tools
+reject invalid ones), so a green demo means the dispatch table, handoff contract, and
+lease/transition path are all intact. The demo exits non-zero if the ticket does not
+complete its journey, and `tests/test_demo.py` guards it in CI.
+
 `doctor` is a **readiness gate**, not just a connectivity check. It classifies findings and
 prints `READY: yes|no`, exiting non-zero until the deployment is safe and useful to run:
 

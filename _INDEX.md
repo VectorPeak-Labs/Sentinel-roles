@@ -57,7 +57,8 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   ├── config.py              # env settings + config/pipeline.yml loader (RoleConfig, Settings); validate_config fails fast on a malformed dispatch table
 │   ├── audit.py               # append-only JSONL audit log (thread-locked); size-rotated with retention; read_records(ticket/event/role) queryable via GET /audit + `python -m sentinel.audit recent|ticket` CLI
 │   ├── doctor.py              # readiness-gate CLI: classifies findings BLOCKERS/WARNINGS/INFO (READY: yes|no), --format json, --no-network; commands/docs/Jira(+/mypermissions)/LiteLLM/security
-│   └── onboard.py             # guided setup CLI: writes .env (from .env.example) + fills pipeline.yml commands; secrets never printed
+│   ├── onboard.py             # guided setup CLI: writes .env (from .env.example) + fills pipeline.yml commands; secrets never printed
+│   └── demo.py                # deterministic end-to-end demo CLI (`python -m sentinel.demo`): drives the REAL orchestrator/agent/tools/lease/audit against an in-memory board + scripted LLM (no Jira/LiteLLM/secrets); walks one ticket New→Tech Review Accepted
 ├── config/pipeline.yml        # THE dispatch table: role triggers, WIP limits, labels, models, project commands
 ├── docs/                      # role goal documents — these ARE the agents' system prompts
 │   ├── README.md              # loading contract + pointer to the project vision
@@ -86,6 +87,7 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   └── test_ops.py            # GET /ops.json: status roll-up, snapshot shape + no-secrets, recent-escalation filter/sanitize/limit, idle-endpoint smoke
 │   └── test_doctor.py         # readiness gate: command-blank blockers (role impact), security/reviewer warnings, ready() logic, text/json render, LLM error classification
 │   └── test_audit_cli.py      # audit query CLI: recent/ticket timelines, event/role filters, text+json, empty→stderr, malformed-line skip, read_records role filter
+│   └── test_demo.py           # end-to-end demo: ticket reaches target status, walks every scripted role in order, one valid handoff per transition, deterministic, flow↔pipeline.yml agreement, renderers
 ├── conftest.py                # inserts repo root into sys.path (bare `pytest` support)
 ├── Dockerfile                 # python:3.12-slim + git/curl (for shell roles); entrypoint serve|doctor
 ├── docker-compose.yml         # sentinel service (port 8080, docs+config mounted ro, /data volume) + doctor profile
@@ -346,6 +348,7 @@ tickets in a status with no agent. `doctor` surfaces the same check before it to
 # Development
 python -m venv .venv && .venv/bin/pip install -r requirements.txt pytest
 .venv/bin/pytest tests -q            # 60+ tests, no network, in-memory fakes
+python -m sentinel.demo              # deterministic end-to-end walkthrough (no Jira/LiteLLM/secrets)
 
 # Pre-flight against real infra (needs .env values exported)
 python -m sentinel.doctor            # readiness gate: BLOCKERS/WARNINGS/INFO + READY: yes|no
