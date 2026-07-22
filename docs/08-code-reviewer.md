@@ -27,6 +27,8 @@ Ticket in **Tech Review** (MR open, CI green).
    - Any `blocker`/`major` → **reject** with the full findings payload (see 00-overview §Rejection payload). Every finding: severity, `criterion_ref`, file:line, description, `required_action`.
 6. **Approve mechanics:** approve the MR (merge itself happens in role 09's pipeline), post handoff, transition.
 
+**Evidence bundles (see 00-overview §Evidence bundle standard):** write your scan results to `evidence/sast-summary.md`, `evidence/dependency-scan.json`, and `evidence/secrets-scan.txt` (each records tool, command, timestamp, result, findings, and dismissed findings with their reason); `check_evidence` each file, then `attach_file` it and name it in `outputs.evidence_ref`.
+
 ## Exit criteria (checklist)
 - [ ] `REV-1` Every AC has an explicit satisfied/partial/not judgment with code references.
 - [ ] `REV-2` Test-quality judgment recorded.

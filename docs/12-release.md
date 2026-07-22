@@ -22,6 +22,8 @@ Tickets in **Client Review Accepted** + an open release window (scheduled, or hu
 5. **Verify:** post-deploy suite green + key business paths manually spot-checked via automation; watch error rates for the defined soak period (default 30 min).
 6. **Close out:** tickets → Done with release version; notes published; stakeholders notified.
 
+**Evidence bundles (see 00-overview §Evidence bundle standard):** record the release in `evidence/release-manifest.yaml` (version, tickets, build_ids, migration_order, rollback_path), the production deploy in `evidence/deploy-production.md`, and any rollback in `evidence/rollback-verification.md`. `check_evidence` each file, `attach_file` it, and name it in `outputs.evidence_ref`.
+
 ## Exit criteria (checklist)
 - [ ] `REL-1` Release manifest recorded (tickets, builds, migration order).
 - [ ] `REL-2` CVE re-scan green (or affected tickets pulled + escalated).

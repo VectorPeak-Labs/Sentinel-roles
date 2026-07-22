@@ -28,6 +28,7 @@ from .llm import LLM
 from .metrics import Metrics
 from .notify import Notifier
 from .payloads import find_payload, validate_handoff, validate_rejection
+from . import evidence as evidencemod
 
 log = logging.getLogger("sentinel.tools")
 
@@ -200,6 +201,19 @@ SHELL_TOOLS = [
           ["command"]),
 ]
 
+EVIDENCE_TOOLS = [
+    _tool("check_evidence",
+          "Validate an evidence bundle file in your workspace against the project's "
+          "evidence bundle standard (docs/00-overview) BEFORE you attach it — checks the "
+          "required sections/keys are present. Non-mutating and advisory: it returns the "
+          "missing sections so you can fix the file, then attach it with attach_file.",
+          {"path": {"type": "string", "description": "Workspace-relative path of the evidence "
+                    "file, e.g. evidence/qa-report.md"},
+           "kind": {"type": "string", "description": "Bundle kind (optional; inferred from the "
+                    "filename, e.g. deploy-staging.md -> deploy-record)"}},
+          ["path"]),
+]
+
 ESTIMATOR_TOOLS = [
     _tool("run_estimators",
           "Refinement only: run N independent, blind estimator instances (separate LLM "
@@ -219,7 +233,7 @@ def tools_for_role(role: RoleConfig) -> list[dict]:
     if role.role_id.startswith("13-"):
         tools += ROUTER_TOOLS
     if role.shell:
-        tools += SHELL_TOOLS
+        tools += SHELL_TOOLS + EVIDENCE_TOOLS
     if role.role_id.startswith("05-"):
         tools += ESTIMATOR_TOOLS
     return tools
@@ -635,6 +649,39 @@ async def _run_command(ctx: ToolContext, args: dict) -> ToolResult:
     return ToolResult(_truncate(out))
 
 
+async def _check_evidence(ctx: ToolContext, args: dict) -> ToolResult:
+    if not ctx.role.shell:
+        return ToolResult("ERROR: this role does not produce evidence bundles")
+    path_arg = str(args.get("path") or "").strip()
+    if not path_arg:
+        return ToolResult("ERROR: path is required (a workspace-relative evidence file)")
+    # Same path-aware containment rule as run_command / attach_file.
+    src = (ctx.workspace / path_arg).resolve()
+    if not src.is_relative_to(ctx.workspace.resolve()):
+        return ToolResult("ERROR: path must stay inside the workspace")
+    if not src.is_file():
+        return ToolResult(f"ERROR: no such file in the workspace: {path_arg}")
+    kind = str(args.get("kind") or "").strip() or evidencemod.resolve_kind(path_arg)
+    if not kind:
+        known = ", ".join(sorted(evidencemod.BUNDLES))
+        return ToolResult(f"ERROR: '{Path(path_arg).name}' is not a recognized evidence "
+                          f"bundle filename and no kind was given. Known kinds: {known}. "
+                          f"Name the file per the standard (e.g. evidence/qa-report.md).")
+    try:
+        content = src.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError):
+        return ToolResult(f"ERROR: {path_arg} is not a readable text bundle")
+    result = evidencemod.validate_bundle(kind, content)
+    ctx.audit.record("evidence_checked", role=ctx.role.role_id, ticket=ctx.ticket,
+                     kind=kind, ok=result.ok, issues=len(result.errors))
+    if result.ok:
+        return ToolResult(f"OK: {path_arg} is a valid '{kind}' evidence bundle — attach it "
+                          f"with attach_file.")
+    return ToolResult(f"{path_arg} does not yet meet the '{kind}' evidence standard:\n- "
+                      + "\n- ".join(result.errors)
+                      + "\nFix these and re-check; the required layout is in docs/00-overview.")
+
+
 _ESTIMATOR_PROMPT = """You are an independent story-point estimator in a blind planning-poker round.
 Estimate the ticket below on the project's point scale, calibrated against the reference set.
 You see no other estimator's work. Price the risky work, not just the visible work.
@@ -684,4 +731,5 @@ _HANDLERS = {
     "increment_rework": _increment_rework,
     "run_command": _run_command,
     "run_estimators": _run_estimators,
+    "check_evidence": _check_evidence,
 }

@@ -25,6 +25,8 @@ Batching: on a schedule (e.g. twice daily) or when the queue reaches N tickets �
 5. **Annotate:** on every ticket in the batch set `deployed_build` for the environment, post build info + timestamp.
 6. **Transition:** A → **Internal Review**; B → **Client Review**.
 
+**Evidence bundles (see 00-overview §Evidence bundle standard):** record each environment you deploy in `evidence/deploy-<env>.md` (environment, build, command, output, smoke result); on any rollback also write `evidence/rollback-verification.md` (trigger, rollback command, verification). `check_evidence` each file, `attach_file` it, and name it in `outputs.evidence_ref`.
+
 ## Exit criteria (checklist)
 - [ ] `DEP-1` Batch composition recorded (which tickets, which build).
 - [ ] `DEP-2` (A) merges in dependency-safe order, no unresolved conflicts in the batch.
