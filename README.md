@@ -95,7 +95,12 @@ Humans steer the pipeline entirely through Jira labels:
 Agents ask questions and deliver packets as ticket comments; reply in comments and the
 ticket wakes the responsible agent (via webhook, or on the next sweep). File evidence
 (screenshots, scan reports, evidence bundles) is exchanged as ticket attachments, which
-agents read and upload themselves.
+agents read and upload themselves. Those bundles follow a **standard** (`sentinel/evidence.py`,
+documented in `docs/00-overview-and-conventions.md` §Evidence bundle standard): fixed names
+and minimal schemas — `evidence/sast-summary.md`, `dependency-scan.json`, `secrets-scan.txt`,
+`qa-report.md`, `deploy-<env>.md`, `release-manifest.yaml`, `rollback-verification.md` — so a
+downstream role or an operator can find and read a ticket's evidence without guessing. Shell
+roles validate each bundle with the `check_evidence` tool before attaching it.
 
 Those labels steer individual tickets. To freeze the **whole** pipeline at once — an
 incident, a bad model rollout, a maintenance window — use the pause control instead of

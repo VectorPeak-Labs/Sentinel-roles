@@ -47,7 +47,7 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   ├── server.py              # FastAPI app: /health, /ops.json (operator snapshot), /metrics, /audit, /webhook/jira, /sweep, /pause, /resume; starts the orchestrator loop
 │   ├── orchestrator.py        # role 01: sweep + webhook dispatch, leases, WIP, loop-breaker, handoff audit
 │   ├── agent.py               # AgentRunner: builds system prompts, runs the LLM tool loop, heartbeats
-│   ├── tools.py               # all 19 agent tools + their enforcement logic (the contract layer)
+│   ├── tools.py               # all 20 agent tools + their enforcement logic (the contract layer); includes check_evidence (validates evidence bundles pre-handoff)
 │   ├── payloads.py            # agent_handoff / rework YAML schema validators + comment extraction
 │   ├── jira.py                # async Jira Server/DC client (httpx); issue-property state keys; attachment up/download; retry/backoff on transient errors
 │   ├── lease.py               # LeaseManager: claim / heartbeat / release / reclaim protocol
@@ -57,7 +57,8 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   ├── config.py              # env settings + config/pipeline.yml loader (RoleConfig, Settings); validate_config fails fast on a malformed dispatch table
 │   ├── audit.py               # append-only JSONL audit log (thread-locked); size-rotated with retention; read_records(ticket/event/role) queryable via GET /audit + `python -m sentinel.audit recent|ticket` CLI
 │   ├── doctor.py              # readiness-gate CLI: classifies findings BLOCKERS/WARNINGS/INFO (READY: yes|no), --format json, --no-network; commands/docs/Jira(+/mypermissions)/LiteLLM/security
-│   └── onboard.py             # guided setup CLI: writes .env (from .env.example) + fills pipeline.yml commands; secrets never printed
+│   ├── onboard.py             # guided setup CLI: writes .env (from .env.example) + fills pipeline.yml commands; secrets never printed
+│   └── evidence.py            # evidence bundle standard: registry of bundle names/schemas (SAST/dep/secrets/QA/deploy/release/rollback) + validate_bundle/template/catalog (pure); backs the check_evidence tool and shell-role prompts
 ├── config/pipeline.yml        # THE dispatch table: role triggers, WIP limits, labels, models, project commands
 ├── docs/                      # role goal documents — these ARE the agents' system prompts
 │   ├── README.md              # loading contract + pointer to the project vision
@@ -86,6 +87,7 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   └── test_ops.py            # GET /ops.json: status roll-up, snapshot shape + no-secrets, recent-escalation filter/sanitize/limit, idle-endpoint smoke
 │   └── test_doctor.py         # readiness gate: command-blank blockers (role impact), security/reviewer warnings, ready() logic, text/json render, LLM error classification
 │   └── test_audit_cli.py      # audit query CLI: recent/ticket timelines, event/role filters, text+json, empty→stderr, malformed-line skip, read_records role filter
+│   └── test_evidence.py       # evidence bundle standard: registry integrity, per-kind validate pass/fail (markdown sections + json/yaml keys), template round-trips, resolve_kind (deploy-<env>), catalog_text; check_evidence tool (valid/missing/containment/kind-inference, shell-only)
 ├── conftest.py                # inserts repo root into sys.path (bare `pytest` support)
 ├── Dockerfile                 # python:3.12-slim + git/curl (for shell roles); entrypoint serve|doctor
 ├── docker-compose.yml         # sentinel service (port 8080, docs+config mounted ro, /data volume) + doctor profile
@@ -252,6 +254,12 @@ Key enforcement details:
   Jira (the PAT rides on every client request). Both directions cap at 20 MB.
 - **`run_estimators`** spawns ≤5 blind, independent LLM contexts (temperature 1.0) for
   planning poker; convergence is applied by the refinement agent, ratification by a human.
+- **`check_evidence`** (shell roles) validates an `evidence/` bundle file against the
+  **evidence bundle standard** (`sentinel/evidence.py`: standardized names + minimal
+  schemas for SAST/dependency/secrets scans, QA report, per-env deploy record, release
+  manifest, rollback verification) before it is attached — advisory (reports missing
+  sections, never blocks the attachment), same path-aware containment as `run_command`.
+  The producing roles' prompts list the bundle(s) each owes (injected from the registry).
 
 ## 6. State model & payload schemas
 

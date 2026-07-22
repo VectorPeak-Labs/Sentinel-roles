@@ -15,6 +15,7 @@ import logging
 from functools import lru_cache
 from pathlib import Path
 
+from . import evidence
 from .config import RoleConfig, Settings
 from .jira import JiraClient, PROP_RETRIES
 from .lease import LeaseError, LeaseManager
@@ -80,6 +81,17 @@ leases dangling when you `finish_run`.
 You have `run_command` in a persistent workspace directory. Project-specific commands configured
 by the humans (use these rather than guessing):
 {cmd_lines}
+"""
+        bundles = evidence.catalog_text(role.role_id)
+        bundle_block = bundles or ("- (this role produces no standard bundle itself; still put "
+                                   "any evidence you attach under `evidence/` and follow the "
+                                   "standard in docs/00-overview)")
+        preamble += f"""
+## Evidence bundles (universal rule 5 — evidence over assertion)
+Write evidence into an `evidence/` directory in your workspace using the project's standard
+names/schemas, then `check_evidence` each file BEFORE `attach_file` so the next role and the
+audit trail can find and read it. Bundles you are responsible for:
+{bundle_block}
 """
     return "\n\n---\n\n".join(parts) + "\n\n---\n\n" + preamble
 

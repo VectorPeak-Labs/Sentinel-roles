@@ -97,6 +97,24 @@ Mandatory escalation triggers (all roles): `rework_count` > 2 · contradictory r
 - **DoR-technical** (owned by 05): technical approach, subtasks, agreed estimate, risk log, drafted test scenarios, no blocking dependency, security checklist attached.
 - **DoD** (verified cumulatively by 08 + 10): all AC pass with evidence, CI green, security gates green, visual QA within tolerance, docs/release notes updated.
 
+## Evidence bundle standard
+
+Universal rule 5 is *evidence over assertion*. Evidence is exchanged as **Jira attachments**; this standard fixes their **names and minimal schemas** so a downstream role — or an operator reading the ticket — can find and interpret them without guessing. Shell roles write these files under an `evidence/` directory in their workspace, validate each with the `check_evidence` tool, then `attach_file` it to the ticket; the handoff `outputs.evidence_ref` names the bundle(s). This does **not** replace Jira attachments or add a storage service — it is a naming/schema convention over the existing evidence channel.
+
+| Bundle (`evidence/…`) | Producer | Required sections / keys |
+|---|---|---|
+| `sast-summary.md` | 08 | tool, command, timestamp, result, findings, dismissed |
+| `dependency-scan.json` | 08 | tool, command, timestamp, result, findings, dismissed |
+| `secrets-scan.txt` | 08 | tool, command, timestamp, result, findings, dismissed |
+| `qa-report.md` | 10 | environment, build, acceptance (AC checks), screenshots, failures |
+| `deploy-<env>.md` | 09 / 12 | environment, build, command, output, smoke |
+| `release-manifest.yaml` | 12 | version, tickets, build_ids, migration_order, rollback_path |
+| `rollback-verification.md` | 09 / 12 | trigger, rollback, verification |
+
+Scan bundles record *dismissed* findings with a reason (a false positive or accepted risk is documented, never silently dropped). An empty `findings` list means "clean"; a **missing** section/key is an incomplete bundle. The registry, validators, and fillable templates live in `sentinel/evidence.py`; `check_evidence` reports missing sections before you attach (advisory — it never blocks the attachment, it tells you what the next role will be missing).
+
+**Finding a ticket's evidence:** the attachments on the ticket, named per the table above; `get_ticket` lists them, `get_attachment` downloads them, and the handoff payload's `outputs.evidence_ref` points at the relevant bundle(s).
+
 ## Ticket metadata (custom fields)
 
 `agent_lease` · `rework_count` · `rejected_from` · `security_checklist` · `open_questions` · `evidence_links` · `deployed_build` (per environment)

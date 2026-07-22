@@ -34,6 +34,8 @@ Ticket assigned in **In Progress** (fresh from Planner, or returning from Rework
 - [ ] `IMP-6` No unrelated refactors or scope expansion in the diff.
 - [ ] `IMP-7` (Rework only) every fix-brief finding has a "resolved by" reference.
 
+You produce no standalone evidence bundle at this stage (the SAST/dependency/secrets bundles are role 08's), but any evidence file you attach follows the same convention: put it under `evidence/` and use `check_evidence` before `attach_file` (see 00-overview §Evidence bundle standard).
+
 ## End state — success
 Ticket in **Tech Review**, MR open and CI-green. Handoff `outputs`: `{mr_url, ci_run, deviations: [], sec_self_check: pass}`.
 
