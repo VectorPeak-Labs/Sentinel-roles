@@ -282,3 +282,29 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt pytest
 .venv/bin/pytest tests -q         # payload-contract + config/dispatch-table tests
 python -m sentinel.doctor          # readiness gate against real Jira/LiteLLM (needs .env vars)
 ```
+
+### Prompt regression evals
+
+The role documents in `docs/` are loaded verbatim as agent system prompts, so deleting a
+load-bearing instruction can change behavior without touching any Python. The eval suite
+guards against that:
+
+```bash
+python -m sentinel.eval_prompts               # deterministic, no LLM/secrets; exit 1 on any regression
+python -m sentinel.eval_prompts --format json # machine-readable results
+python -m sentinel.eval_prompts --model gpt-4o  # OPT-IN: run scenarios against a real model, print for review
+```
+
+Each scenario in `evals/role_behaviors.yml` names a role and the behavioral invariant its
+prompt must keep encoding (e.g. *Intake marks unknowns `TODO(PO)`*, *Reviewer rejects red
+CI / missing AC mapping*, *Release refuses production without a window + human-approved
+notes*). The deterministic run builds each role's **assembled** prompt (`build_system_prompt`
+= shared docs + role doc + runtime preamble) and checks the required concepts are present; a
+regression fails the run and names the role and the missing concept. It runs in CI with no
+external services (`tests/test_eval_prompts.py`). The optional `--model` mode sends each
+scenario to LiteLLM and prints the response for human review — it is not auto-graded.
+
+**To add a scenario**, append an entry to `evals/role_behaviors.yml`: a unique `id`, the
+`role`, a `scenario`/`invariant` description, and `must_include` — a list of concept groups
+(ALL groups must match; within a group ANY listed phrasing counts, so wording can change but
+deleting the concept fails). Optionally a `probe` message for `--model` capture mode.

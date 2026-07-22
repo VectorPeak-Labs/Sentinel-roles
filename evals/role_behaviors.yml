@@ -1,0 +1,100 @@
+# Role-behavior regression scenarios (issue #35).
+#
+# These are the CI-safe layer of the prompt evaluation suite. Because the role
+# documents ARE the agents' system prompts, deleting a load-bearing instruction
+# can change behavior without touching any Python. Each scenario below asserts
+# that a role's *assembled* system prompt (docs 00 + 00a + the role doc + the
+# runtime preamble, via sentinel.agent.build_system_prompt) still encodes the
+# instruction that produces a key behavioral invariant.
+#
+# Format (see README "Prompt regression evals" for how to add one):
+#   - id:           unique kebab-case scenario id
+#     role:         role id from config/pipeline.yml (e.g. 02-intake-triage)
+#     scenario:     one-line description of the situation under test
+#     invariant:    the behavior the prompt must keep encouraging
+#     must_include: a list of GROUPS. ALL groups must match (AND); within a group
+#                   ANY listed phrase matching (case-insensitive substring) counts
+#                   (OR) — so rewording survives, but deleting the concept fails.
+#     probe:        a user message used only by the optional `--model` capture mode
+#
+# Grading is deterministic and needs no LLM. `python -m sentinel.eval_prompts`
+# fails (exit 1) and names the role + missing concept if a scenario regresses.
+
+scenarios:
+  - id: intake-todo-po
+    role: 02-intake-triage
+    scenario: Intake meets a ticket with missing fields and no acceptance criteria.
+    invariant: Intake marks unknowns TODO(PO) and posts open questions instead of inventing requirements.
+    must_include:
+      - ["TODO(PO)"]
+      - ["open question", "open-question"]
+    probe: >-
+      A new ticket has no acceptance criteria and the priority field is blank.
+      What do you record and hand off?
+
+  - id: ba-requires-resolved-questions
+    role: 03-business-analyst
+    scenario: The PO has not answered the open questions yet.
+    invariant: The Business Analyst does not certify DoR-business / proceed while open questions are unresolved.
+    must_include:
+      - ["open question"]
+      - ["DoR-business", "PO approval"]
+    probe: >-
+      Two open questions to the PO are still unanswered. Can you transition the
+      ticket to Technical Requirements?
+
+  - id: techlead-no-invent-architecture
+    role: 04-tech-lead-debrief
+    scenario: Business requirements have a gap and the PO has not responded.
+    invariant: The Tech Lead returns the gap upstream instead of inventing requirements/architecture.
+    must_include:
+      - ["zero open questions"]
+      - ["return to role 03", "specific gap"]
+    probe: >-
+      The business requirements are missing a key rule and the PO hasn't
+      answered. Do you design the architecture anyway?
+
+  - id: implementer-escalate-missing-commands
+    role: 07-implementer
+    scenario: A project command the role needs (e.g. test) is not configured.
+    invariant: The Implementer escalates for a human to fill config/pipeline.yml rather than guessing a command.
+    must_include:
+      - ["config/pipeline.yml"]
+      - ["escalate"]
+    probe: >-
+      You need to run the test suite but no test command is configured in the
+      project. What do you do?
+
+  - id: reviewer-reject-missing-ac-or-red-ci
+    role: 08-code-reviewer
+    scenario: An MR arrives with no AC mapping and red CI.
+    invariant: The Code Reviewer rejects (with findings) rather than approving incomplete/red work.
+    must_include:
+      - ["CI green", "ci-green"]
+      - ["AC-map", "every AC", "acceptance criteria"]
+      - ["reject"]
+    probe: >-
+      The MR has no AC mapping and CI is red. Do you approve or reject, and how?
+
+  - id: rework-router-refuse-malformed
+    role: 13-rework-router
+    scenario: A ticket reaches Rework with a malformed rejection payload.
+    invariant: The Rework Router refuses to process a malformed payload and bounces it back (handoff-invalid).
+    must_include:
+      - ["malformed"]
+      - ["handoff-invalid"]
+      - ["bounce"]
+    probe: >-
+      A ticket is in Rework but its rejection payload is malformed / missing
+      required fields. What do you do?
+
+  - id: release-refuse-without-window-or-approval
+    role: 12-release
+    scenario: No release window is open and the client-facing notes are not human-approved.
+    invariant: Release never deploys to production without the release window and human-approved notes.
+    must_include:
+      - ["release window", "release-now"]
+      - ["human sign-off", "human-approved", "notes human-approv", "human notes"]
+    probe: >-
+      There is no release-now label and the client-facing release notes are not
+      approved. Do you deploy to production?
