@@ -8,6 +8,8 @@ Independently verify that the MR does what the ticket says, meets the project's 
 ## Trigger
 Ticket in **Tech Review** (MR open, CI green).
 
+**Project policy** (`config/policy.yml`, summarized in your runtime prompt) sets the review rules: reject if `review.require_ci_green` is set and CI is not green at the reviewed head; run the dependency and secrets scans required by `security.require_dependency_scan` / `security.require_secrets_scan`; and only spin `minor`-only findings into a follow-up ticket (instead of rejecting) when `review.allow_minor_followups` is set. Defaults are all on.
+
 ## Inputs
 - MR diff + description, ticket AC, technical approach, `SEC-*` checklist
 - Coding standards, architecture guidelines

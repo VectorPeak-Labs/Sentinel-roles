@@ -64,6 +64,36 @@ python -m sentinel.onboard --run-doctor # write, then run doctor against the new
 - `--non-interactive` takes values from the environment (`SENTINEL_CMD_<NAME>` for commands),
   for scripted/CI setup and dry-run checks.
 
+### Project policy pack
+
+The security, review, QA, and release rules a team wants to enforce live in one place —
+`config/policy.yml` — instead of being scattered as hardcoded assumptions across role
+documents:
+
+```yaml
+security:
+  baseline: owasp-asvs-l2        # owasp-asvs-l1 | l2 | l3 | none
+  require_dependency_scan: true
+  require_secrets_scan: true
+review:
+  require_ci_green: true
+  allow_minor_followups: true
+qa:
+  require_visual_evidence: true
+  require_screenshots: true
+release:
+  require_human_notes_approval: true
+  soak_minutes: 30
+  require_reversible_migrations: true
+```
+
+The shipped defaults are **equivalent to Sentinel's built-in behavior**, so a deployment with
+no `policy.yml` (or one that omits a key) is unchanged. The active policy is validated at
+startup — an invalid value (an unknown security baseline, a negative soak, a non-boolean flag)
+fails loudly like a bad `pipeline.yml` — and **summarized into every role agent's system
+prompt**, so the reviewer, QA, and release agents follow the project's declared standard rather
+than a doc default. Point `SENTINEL_POLICY` at a different path to override the location.
+
 ### Jira prerequisites
 
 1. **PAT**: create a Personal Access Token for a dedicated Jira service account (Jira

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +17,10 @@ _ENV_REF = re.compile(r"\$\{([A-Za-z0-9_]+)(?::([^}]*))?\}")
 # validator rejects it at load time (see validate_config).
 KNOWN_TRIGGER_TYPES = frozenset({"ticket", "queue"})
 KNOWN_CONDITIONS = frozenset({"capacity_in_progress", "release_window"})
+
+# Application-security baselines the policy pack understands. `none` disables the
+# named-standard check (the pipeline still runs the per-ticket SEC-* checklist).
+KNOWN_SECURITY_BASELINES = ("owasp-asvs-l1", "owasp-asvs-l2", "owasp-asvs-l3", "none")
 
 
 class ConfigError(RuntimeError):
@@ -58,6 +62,134 @@ class RoleConfig:
         return status.lower() in {s.lower() for s in self.statuses}
 
 
+# --------------------------------------------------------------------------- #
+# Project policy pack (config/policy.yml)
+#
+# Externalizes the security / review / QA / release rules that were previously
+# hardcoded assumptions in the role documents, so a project can set them without
+# hand-editing prompts. Simple typed config, NOT a policy engine (per issue #33):
+# the defaults below are equivalent to Sentinel's built-in behavior, so an absent
+# or partial policy.yml changes nothing.
+# --------------------------------------------------------------------------- #
+
+@dataclass(frozen=True)
+class SecurityPolicy:
+    baseline: str = "owasp-asvs-l2"
+    require_dependency_scan: bool = True
+    require_secrets_scan: bool = True
+
+
+@dataclass(frozen=True)
+class ReviewPolicy:
+    require_ci_green: bool = True
+    allow_minor_followups: bool = True
+
+
+@dataclass(frozen=True)
+class QaPolicy:
+    require_visual_evidence: bool = True
+    require_screenshots: bool = True
+
+
+@dataclass(frozen=True)
+class ReleasePolicy:
+    require_human_notes_approval: bool = True
+    soak_minutes: int = 30
+    require_reversible_migrations: bool = True
+
+
+@dataclass(frozen=True)
+class Policy:
+    security: SecurityPolicy = field(default_factory=SecurityPolicy)
+    review: ReviewPolicy = field(default_factory=ReviewPolicy)
+    qa: QaPolicy = field(default_factory=QaPolicy)
+    release: ReleasePolicy = field(default_factory=ReleasePolicy)
+
+    def summary_lines(self) -> list[str]:
+        """Compact, human/prompt-readable rendering of the active policy."""
+        s, r, q, rel = self.security, self.review, self.qa, self.release
+        def yn(v: bool) -> str:
+            return "required" if v else "not required"
+        return [
+            f"Security baseline: {s.baseline}. Dependency scan {yn(s.require_dependency_scan)}; "
+            f"secrets scan {yn(s.require_secrets_scan)} (role 08).",
+            f"Review: CI green {yn(r.require_ci_green)}; minor-only findings may become a "
+            f"follow-up ticket: {'yes' if r.allow_minor_followups else 'no'} (role 08).",
+            f"QA: visual evidence {yn(q.require_visual_evidence)}; screenshots "
+            f"{yn(q.require_screenshots)} (role 10).",
+            f"Release: human-approved notes {yn(rel.require_human_notes_approval)}; "
+            f"soak {rel.soak_minutes} min; reversible migrations "
+            f"{yn(rel.require_reversible_migrations)} (role 12).",
+        ]
+
+
+_SECTION_TYPES = {"security": SecurityPolicy, "review": ReviewPolicy,
+                  "qa": QaPolicy, "release": ReleasePolicy}
+
+
+def _coerce_section(name: str, cls, raw: object, problems: list[str]) -> dict:
+    """Overlay a raw YAML section onto its typed defaults, type-checking each key."""
+    values: dict[str, object] = {}
+    if raw is None:
+        return values
+    if not isinstance(raw, dict):
+        problems.append(f"policy.{name} must be a mapping")
+        return values
+    known = {f.name: f.type for f in fields(cls)}
+    for key, value in raw.items():
+        if key not in known:
+            problems.append(f"policy.{name}.{key} is not a recognized policy key "
+                            f"(known: {', '.join(sorted(known))})")
+            continue
+        if known[key] == "bool":
+            if not isinstance(value, bool):
+                problems.append(f"policy.{name}.{key} must be true or false, got {value!r}")
+                continue
+        elif known[key] == "int":
+            if isinstance(value, bool) or not isinstance(value, int):
+                problems.append(f"policy.{name}.{key} must be an integer, got {value!r}")
+                continue
+            if value < 0:
+                problems.append(f"policy.{name}.{key} must be >= 0, got {value}")
+                continue
+        values[key] = value
+    return values
+
+
+def build_policy(raw: dict | None) -> tuple[Policy, list[str]]:
+    """Build a Policy from a raw mapping, overlaying onto defaults. Returns the
+    policy (defaults for anything invalid/absent) plus a list of problems."""
+    problems: list[str] = []
+    raw = raw or {}
+    if not isinstance(raw, dict):
+        return Policy(), ["policy.yml must be a mapping of sections"]
+    for section in raw:
+        if section not in _SECTION_TYPES:
+            problems.append(f"policy.{section} is not a recognized section "
+                            f"(known: {', '.join(sorted(_SECTION_TYPES))})")
+    sections = {name: cls(**_coerce_section(name, cls, raw.get(name), problems))
+                for name, cls in _SECTION_TYPES.items()}
+    policy = Policy(**sections)
+    if policy.security.baseline not in KNOWN_SECURITY_BASELINES:
+        problems.append(f"policy.security.baseline '{policy.security.baseline}' is not one of "
+                        f"{list(KNOWN_SECURITY_BASELINES)}")
+    return policy, problems
+
+
+def load_policy(path: str | os.PathLike | None = None) -> tuple[Policy, list[str]]:
+    """Load the policy pack. A missing file yields built-in defaults (behavior
+    unchanged); a present-but-invalid file yields defaults plus problems (the
+    caller — load_settings — turns problems into a ConfigError, failing loudly)."""
+    path = Path(path or os.environ.get("SENTINEL_POLICY", "config/policy.yml"))
+    if not path.exists():
+        return Policy(), []
+    try:
+        raw = yaml.safe_load(path.read_text())
+    except yaml.YAMLError as e:
+        return Policy(), [f"policy file {path} is not valid YAML: {e}"]
+    return build_policy(_expand_env(raw) if isinstance(raw, dict) else raw)
+
+
 @dataclass
 class Settings:
     jira_base_url: str
@@ -89,6 +221,7 @@ class Settings:
     wip_limits: dict[str, int] = field(default_factory=dict)
     roles: dict[str, RoleConfig] = field(default_factory=dict)
     commands: dict[str, str] = field(default_factory=dict)
+    policy: Policy = field(default_factory=Policy)
 
     def label(self, key: str) -> str:
         return self.labels.get(key, key)
@@ -233,4 +366,11 @@ def load_settings(config_path: str | os.PathLike | None = None) -> Settings:
     if problems:
         raise ConfigError(
             f"Invalid pipeline configuration in {path}:\n  - " + "\n  - ".join(problems))
+
+    # Project policy pack: a missing file yields defaults; an invalid one fails
+    # loudly at startup, exactly like a malformed dispatch table.
+    settings.policy, policy_problems = load_policy()
+    if policy_problems:
+        raise ConfigError(
+            "Invalid project policy (config/policy.yml):\n  - " + "\n  - ".join(policy_problems))
     return settings

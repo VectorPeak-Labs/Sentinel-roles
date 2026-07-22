@@ -88,7 +88,7 @@ Mandatory escalation triggers (all roles): `rework_count` > 2 · contradictory r
 
 ## Security baseline
 
-- Named standard: **OWASP ASVS Level 2** (project-configurable). "Security standards matched" always means: checked against the declared per-ticket checklist, never against vibes.
+- Named standard: the **project policy's security baseline** (`config/policy.yml` → `security.baseline`; default **OWASP ASVS Level 2**). The active policy — security, review, QA, and release rules — is summarized in every agent's runtime prompt; follow it over any weaker default here. "Security standards matched" always means: checked against the declared per-ticket checklist, never against vibes.
 - Declared per ticket by role 04 as `SEC-*` items; self-checked by 07; statically enforced by 08; dynamically verified by 10; re-scanned by 12.
 
 ## Definitions (referenced by role docs)

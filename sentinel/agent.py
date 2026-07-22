@@ -40,6 +40,7 @@ def build_system_prompt(settings: Settings, role: RoleConfig, agent_user: str) -
     parts.append(_read_doc(role.doc))
 
     commands = {k: v for k, v in settings.commands.items() if v}
+    policy_block = "\n".join(f"- {line}" for line in settings.policy.summary_lines())
     preamble = f"""# Runtime context
 
 You are the **{role.role_id}** agent in the Sentinel pipeline, operating live against Jira.
@@ -64,6 +65,11 @@ You are the **{role.role_id}** agent in the Sentinel pipeline, operating live ag
 6. Post human-facing communication (questions, packets, findings) as ticket comments; humans
    reply in comments — when you end a run waiting on a reply, sentinel wakes you when the
    ticket is updated.
+
+## Project policy (config/policy.yml — the active security/review/QA/release rules)
+{policy_block}
+Follow these rules over any weaker default in your role document; they are the project's
+declared standard for this deployment.
 """
     if role.trigger_type == "queue":
         preamble += """
