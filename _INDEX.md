@@ -55,7 +55,8 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   ├── notify.py              # outbound alert channel: POST escalations/pause to a webhook (Slack-compatible)
 │   ├── metrics.py             # Prometheus counters + labeled-gauge exposition (served at GET /metrics)
 │   ├── config.py              # env settings + config/pipeline.yml loader (RoleConfig, Settings); validate_config fails fast on a malformed dispatch table
-│   ├── audit.py               # append-only JSONL audit log (thread-locked); size-rotated with retention; read_records(ticket/event/role) queryable via GET /audit + `python -m sentinel.audit recent|ticket` CLI
+│   ├── audit.py               # append-only JSONL audit log (thread-locked); size-rotated with retention; read_records(ticket/event/role/since) queryable via GET /audit + `python -m sentinel.audit recent|ticket` CLI
+│   ├── analytics.py           # workflow analytics CLI (`python -m sentinel.analytics --since 7d`): folds the audit trail into throughput/stage-bottlenecks/waits/rework/escalations/reliability; pure compute_analytics core; audit-derived (no Jira/DB)
 │   ├── doctor.py              # readiness-gate CLI: classifies findings BLOCKERS/WARNINGS/INFO (READY: yes|no), --format json, --no-network; commands/docs/Jira(+/mypermissions)/LiteLLM/security
 │   └── onboard.py             # guided setup CLI: writes .env (from .env.example) + fills pipeline.yml commands; secrets never printed
 ├── config/pipeline.yml        # THE dispatch table: role triggers, WIP limits, labels, models, project commands
@@ -86,6 +87,7 @@ The runtime ships as **one Docker container** (FastAPI + background orchestrator
 │   └── test_ops.py            # GET /ops.json: status roll-up, snapshot shape + no-secrets, recent-escalation filter/sanitize/limit, idle-endpoint smoke
 │   └── test_doctor.py         # readiness gate: command-blank blockers (role impact), security/reviewer warnings, ready() logic, text/json render, LLM error classification
 │   └── test_audit_cli.py      # audit query CLI: recent/ticket timelines, event/role filters, text+json, empty→stderr, malformed-line skip, read_records role filter
+│   └── test_analytics.py      # workflow analytics: throughput/stage-duration/waits/escalation/rework/reliability metrics on deterministic records, human-transition stage time, --since duration+ISO parsing, read_records since filter, text render ranking
 ├── conftest.py                # inserts repo root into sys.path (bare `pytest` support)
 ├── Dockerfile                 # python:3.12-slim + git/curl (for shell roles); entrypoint serve|doctor
 ├── docker-compose.yml         # sentinel service (port 8080, docs+config mounted ro, /data volume) + doctor profile
@@ -140,7 +142,9 @@ Jira webhooks ─┐                          ┌─> AgentRunner._loop (LLM too
    `GET /audit?ticket=…&event=…&role=…&limit=…` (query the audit trail: newest matching records
    oldest-first across rotated generations via `AuditLog.read_records`; **auth required**
    unlike `/metrics`, since records carry ticket activity and error strings; the same query is
-   available offline as the `python -m sentinel.audit recent|ticket` CLI),
+   available offline as the `python -m sentinel.audit recent|ticket` CLI, and aggregated over a
+   time window by the `python -m sentinel.analytics --since 7d` CLI — throughput/bottlenecks/
+   waits/rework/escalations/reliability, audit-derived, no Jira/DB),
    `GET /ops.json` (read-only operator snapshot built by `build_ops_snapshot` from live
    orchestrator state + the last sweep's `board_state` + recent escalations read from the
    audit trail, reduced to `at`/`event`/`ticket`/`role`; **no secrets**, unauthenticated
@@ -357,6 +361,7 @@ python -m sentinel.onboard           # guided: writes .env + fills pipeline.yml 
 docker compose run --rm doctor
 docker compose up -d --build
 docker compose exec sentinel tail -f /data/audit.jsonl   # audit trail
+python -m sentinel.analytics --since 7d                  # workflow analytics over the audit trail (offline)
 ```
 
 CI (`.github/workflows/ci.yml`) runs the pytest suite on Python 3.12 for every push/PR.

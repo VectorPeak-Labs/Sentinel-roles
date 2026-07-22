@@ -275,6 +275,23 @@ python -m sentinel.audit recent --event escalation --role 09-deployment --format
 `--file PATH` overrides the default `${DATA_DIR:-/data}/audit.jsonl`; `--format json` prints the
 raw records (all fields), text prints a one-line-per-event timeline.
 
+For a **delivery-lead view over a time window** rather than a single ticket, the analytics CLI
+folds the same audit trail into throughput, stage bottlenecks, waits, rework, escalations, and
+reliability indicators:
+
+```bash
+docker compose exec sentinel python -m sentinel.analytics --since 7d     # last 7 days, text
+python -m sentinel.analytics --since 24h --format json                   # machine-readable
+python -m sentinel.analytics --since 2026-07-01 --file ./audit.jsonl     # ISO date + explicit file
+```
+
+`--since` accepts a duration (`7d`, `24h`, `30m`, `2w`) or an ISO date. **Data source and
+limits:** everything is derived from the audit JSONL (no Jira calls, no database), so stage
+durations are audit-derived approximations (measured between the transition into a status and
+the one out of it), and *live* board state — current queue depth, current `needs-human`
+count/age, token/gate status — stays on `GET /ops.json` and `/metrics`. Analytics is the
+historical, flow-over-a-window view; the ops surfaces are the right-now view.
+
 ## Development
 
 ```bash
